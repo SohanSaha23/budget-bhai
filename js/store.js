@@ -14,6 +14,7 @@ const D = {
   addDays(iso, n) { const d = D.parse(iso); d.setDate(d.getDate() + n); return D.toISO(d); },
   addMonths(iso, n) { const d = D.parse(iso); d.setMonth(d.getMonth() + n); return D.toISO(d); },
   monthKey(iso) { return iso.slice(0, 7); },
+  weekStart(iso) { const d = D.parse(iso); return D.addDays(iso, -((d.getDay() + 6) % 7)); }, // Monday
   daysInMonth(y, m) { return new Date(y, m + 1, 0).getDate(); },
   monthName(y, m, short) {
     return new Date(y, m, 1).toLocaleDateString("en-IN", { month: short ? "short" : "long", year: "numeric" });
@@ -262,6 +263,34 @@ const Store = {
       if (g.memberIds.includes(friendId)) collect(this.groupEdges(g.id));
     }
     return bal;
+  },
+
+  /* 1-to-1 history with a friend: expenses + settlements, each carrying the
+     amount that actually moved between the two of you (not the whole bill).
+     delta > 0 => they owe you more, delta < 0 => you owe them more. */
+  friendActivity(friendId) {
+    const out = [];
+    for (const e of this.state.splitExpenses) {
+      if (e.groupId) continue;
+      const mine = e.shares.find(s => s.id === "me");
+      const theirs = e.shares.find(s => s.id === friendId);
+      if (e.paidBy === "me" && theirs) {
+        out.push({ kind: "expense", id: e.id, date: e.date, desc: e.desc, paidBy: "me",
+          total: e.amount, ways: e.shares.length, share: theirs.amount, delta: theirs.amount });
+      } else if (e.paidBy === friendId && mine) {
+        out.push({ kind: "expense", id: e.id, date: e.date, desc: e.desc, paidBy: friendId,
+          total: e.amount, ways: e.shares.length, share: mine.amount, delta: -mine.amount });
+      }
+    }
+    for (const s of this.state.settlements) {
+      if (s.groupId) continue;
+      if (s.from === friendId && s.to === "me") {
+        out.push({ kind: "settle", id: s.id, date: s.date, from: s.from, to: s.to, amount: s.amount, delta: -s.amount });
+      } else if (s.from === "me" && s.to === friendId) {
+        out.push({ kind: "settle", id: s.id, date: s.date, from: s.from, to: s.to, amount: s.amount, delta: s.amount });
+      }
+    }
+    return out.sort((a, b) => a.date < b.date ? 1 : -1);
   },
 
   splitTotals() {

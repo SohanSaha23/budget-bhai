@@ -207,6 +207,8 @@ const Actions = {
   "stats-next": () => { App.statsMove(1); },
   "stats-cat": d => Views.statsCat(d.cat),
   "splits-tab": d => { UI.splitsTab = d.tab; App.render(); },
+  "split-period": d => { UI.splitPeriod = d.p; App.render(); },
+  "settle-edit": d => settleSheet({ edit: d.id }),
   "tx-filter-type": d => { UI.transFilter.type = d.type; App.render(); },
 
   "tx-detail": d => txDetailSheet(d.id),

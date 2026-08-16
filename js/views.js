@@ -9,6 +9,7 @@ const UI = {
   stats: { period: "monthly", anchor: D.todayISO() },
   statsType: "expense",
   splitsTab: "friends",
+  splitPeriod: "monthly",
   transFilter: { q: "", type: "all", cat: "all", acc: "all" },
   groupId: null, friendId: null, accountId: null,
 };
@@ -42,6 +43,97 @@ function txRow(t, showRunning) {
     <div class="emo" style="background:${tint(color, .16)}">${emoji}</div>
     <div class="mid"><div class="nm">${esc(name)}</div><div class="meta">${esc(meta)}</div></div>
     ${amtHtml}
+  </div>`;
+}
+
+/* buckets dated items into Daily / Weekly / Monthly sections, newest first */
+function periodSections(items, period) {
+  const groups = new Map();
+  for (const it of items) {
+    let key, label;
+    if (period === "daily") {
+      key = it.date; label = D.human(it.date);
+    } else if (period === "weekly") {
+      key = D.weekStart(it.date);
+      label = D.short(key) + " – " + D.short(D.addDays(key, 6));
+    } else {
+      key = it.date.slice(0, 7);
+      const [y, m] = key.split("-").map(Number);
+      label = D.monthName(y, m - 1);
+    }
+    if (!groups.has(key)) groups.set(key, { label, items: [] });
+    groups.get(key).items.push(it);
+  }
+  return [...groups.entries()]
+    .sort((a, b) => a[0] < b[0] ? 1 : -1)
+    .map(([, v]) => v);
+}
+
+/* one row on a friend's page — shows only the amount owed between you two */
+function friendActivityRow(it) {
+  const f = Store.friend(UI.friendId);
+  if (it.kind === "settle") {
+    const theyPaid = it.from === UI.friendId;
+    return `<div class="tx" data-action="settle-edit" data-id="${it.id}">
+      <div class="emo" style="background:${tint("#34d399", .16)}">🤝</div>
+      <div class="mid">
+        <div class="nm">${theyPaid ? esc(f.name) + " paid you" : "You paid " + esc(f.name)}</div>
+        <div class="meta">Settlement · ${D.human(it.date)} · tap to edit</div>
+      </div>
+      <div class="amt money">${fmt(it.amount)}</div>
+    </div>`;
+  }
+  const iPaid = it.paidBy === "me";
+  const whose = iPaid ? esc(f.name) + "'s share" : "your share";
+  return `<div class="tx" data-action="split-detail" data-id="${it.id}">
+    <div class="emo" style="background:${tint("#7c6bff", .16)}">🧾</div>
+    <div class="mid">
+      <div class="nm">${esc(it.desc)}</div>
+      <div class="meta">${iPaid ? "You" : esc(f.name)} paid ${fmt(it.total)} · ${it.ways} ways · ${whose}</div>
+    </div>
+    <div class="amt money ${iPaid ? "pos" : "neg"}">${iPaid ? "+" : "−"}${fmt(it.share)}
+      <div class="sub" style="font-weight:600;text-align:right">${iPaid ? "owes you" : "you owe"}</div>
+    </div>
+  </div>`;
+}
+
+/* one row on a group page — full bill, with your own share spelled out */
+function groupActivityRow(it) {
+  if (it.kind === "settle") {
+    return `<div class="tx" data-action="settle-edit" data-id="${it.id}">
+      <div class="emo" style="background:${tint("#34d399", .16)}">🤝</div>
+      <div class="mid">
+        <div class="nm">${esc(Store.friend(it.from)?.name || "?")} paid ${esc(Store.friend(it.to)?.name || "?")}</div>
+        <div class="meta">Settlement · ${D.human(it.date)} · tap to edit</div>
+      </div>
+      <div class="amt money pos">${fmt(it.amount)}</div>
+    </div>`;
+  }
+  const mine = it.shares.find(s => s.id === "me");
+  const iPaid = it.paidBy === "me";
+  return `<div class="tx" data-action="split-detail" data-id="${it.id}">
+    <div class="emo" style="background:${tint("#7c6bff", .16)}">🧾</div>
+    <div class="mid">
+      <div class="nm">${esc(it.desc)}</div>
+      <div class="meta">${iPaid ? "You" : esc(Store.friend(it.paidBy)?.name || "?")} paid · ${it.shares.length} ways${mine ? " · your share " + fmt(mine.amount) : " · not your split"}</div>
+    </div>
+    <div class="amt money">${fmt(it.amount)}</div>
+  </div>`;
+}
+
+function periodTabs(active) {
+  return `<div class="seg" style="margin-bottom:10px">
+    ${["daily", "weekly", "monthly"].map(p =>
+      `<button class="${active === p ? "on" : ""}" data-action="split-period" data-p="${p}">${p[0].toUpperCase() + p.slice(1)}</button>`).join("")}
+  </div>`;
+}
+
+/* renders one section: header + rows, with a per-section net total */
+function sectionBlock(sec, rowFn, totalFn) {
+  const total = totalFn ? totalFn(sec.items) : null;
+  return `<div class="tx-group">
+    <div class="tx-date"><span>${esc(sec.label)}</span>${total !== null ? `<span class="money">${total}</span>` : ""}</div>
+    ${sec.items.map(rowFn).join("")}
   </div>`;
 }
 
@@ -476,9 +568,10 @@ const Views = {
         ...s.settlements.map(e => ({ ...e, kind: "settle" }))].sort((a, b) => a.date < b.date ? 1 : -1);
       body = acts.length ? acts.map(a => {
         if (a.kind === "settle") {
-          return `<div class="tx"><div class="emo" style="background:${tint("#34d399", .16)}">🤝</div>
+          return `<div class="tx" data-action="settle-edit" data-id="${a.id}">
+            <div class="emo" style="background:${tint("#34d399", .16)}">🤝</div>
             <div class="mid"><div class="nm">${esc(Store.friend(a.from)?.name || "?")} paid ${esc(Store.friend(a.to)?.name || "?")}</div>
-            <div class="meta">${a.groupId ? esc(Store.group(a.groupId)?.name || "") + " · " : ""}${D.human(a.date)}</div></div>
+            <div class="meta">${a.groupId ? esc(Store.group(a.groupId)?.name || "") + " · " : ""}${D.human(a.date)} · tap to edit</div></div>
             <div class="amt pos money">${fmt(a.amount)}</div></div>`;
         }
         const payer = Store.friend(a.paidBy);
@@ -509,7 +602,12 @@ const Views = {
   groupDetail() {
     const g = Store.group(UI.groupId);
     if (!g) { UI.view = "splits"; return Views.splits(); }
-    const exp = Store.state.splitExpenses.filter(e => e.groupId === g.id).sort((a, b) => a.date < b.date ? 1 : -1);
+    const exp = Store.state.splitExpenses.filter(e => e.groupId === g.id);
+    const settles = Store.state.settlements.filter(s => s.groupId === g.id);
+    const activity = [
+      ...exp.map(e => ({ ...e, kind: "expense" })),
+      ...settles.map(s => ({ ...s, kind: "settle" })),
+    ].sort((a, b) => a.date < b.date ? 1 : -1);
     const edges = Store.groupEdges(g.id);
     const totalSpent = exp.reduce((s, e) => s + e.amount, 0);
     return `
@@ -531,15 +629,14 @@ const Views = {
         <button class="btn primary" data-action="add-split" data-group="${g.id}">＋ Add expense</button>
       </div>
     </div>
-    <div class="sec"><span class="h2">Expenses</span></div>
-    <div class="card flat stagger" style="padding:8px 10px">
-      ${exp.length ? exp.map(e => `
-        <div class="tx" data-action="split-detail" data-id="${e.id}">
-          <div class="emo" style="background:${tint("#7c6bff", .16)}">🧾</div>
-          <div class="mid"><div class="nm">${esc(e.desc)}</div>
-          <div class="meta">${esc(Store.friend(e.paidBy)?.name || "?")} paid · ${D.human(e.date)}</div></div>
-          <div class="amt money">${fmt(e.amount)}</div>
-        </div>`).join("") : '<div class="empty">No expenses yet.</div>'}
+    <div class="sec"><span class="h2">Activity</span></div>
+    ${periodTabs(UI.splitPeriod)}
+    <div class="card flat" style="padding:6px 10px">
+      ${activity.length
+        ? periodSections(activity, UI.splitPeriod).map(sec =>
+            sectionBlock(sec, groupActivityRow, items =>
+              fmt(items.filter(i => i.kind === "expense").reduce((s, i) => s + i.amount, 0)))).join("")
+        : '<div class="empty">No expenses yet.</div>'}
     </div>`;
   },
 
@@ -547,8 +644,7 @@ const Views = {
     const f = Store.friend(UI.friendId);
     if (!f) { UI.view = "splits"; return Views.splits(); }
     const bal = Store.friendBalance(f.id);
-    const personal = Store.state.splitExpenses.filter(e => !e.groupId &&
-      (e.paidBy === f.id || e.shares.some(sh => sh.id === f.id))).sort((a, b) => a.date < b.date ? 1 : -1);
+    const activity = Store.friendActivity(f.id);
     const shared = Store.state.groups.filter(g => g.memberIds.includes(f.id));
     return `
     <div class="back-head">
@@ -571,15 +667,15 @@ const Views = {
         <div class="pavatar" style="background:var(--chip);font-size:18px">${g.emoji || "👥"}</div>
         <div class="mid"><div class="nm">${esc(g.name)}</div></div><span class="sub">›</span></div>`).join("")}
     </div>` : ""}
-    <div class="sec"><span class="h2">1-to-1 expenses</span></div>
-    <div class="card flat stagger" style="padding:8px 10px">
-      ${personal.length ? personal.map(e => `
-        <div class="tx" data-action="split-detail" data-id="${e.id}">
-          <div class="emo" style="background:${tint("#7c6bff", .16)}">🧾</div>
-          <div class="mid"><div class="nm">${esc(e.desc)}</div>
-          <div class="meta">${esc(Store.friend(e.paidBy)?.name || "?")} paid · ${D.human(e.date)}</div></div>
-          <div class="amt money">${fmt(e.amount)}</div>
-        </div>`).join("") : '<div class="empty">No direct expenses yet.</div>'}
+
+    <div class="sec"><span class="h2">Activity</span></div>
+    ${periodTabs(UI.splitPeriod)}
+    <div class="card flat" style="padding:6px 10px">
+      ${activity.length
+        ? periodSections(activity, UI.splitPeriod).map(sec =>
+            sectionBlock(sec, friendActivityRow, items =>
+              fmt(items.reduce((s, it) => s + it.delta, 0), true))).join("")
+        : '<div class="empty">No 1-to-1 activity yet.</div>'}
     </div>`;
   },
 
@@ -748,6 +844,6 @@ const Views = {
       ${item("🧪", "Reset demo data", "", "reset-demo")}
       ${item("🗑️", "Erase everything", "", "erase-all")}
     </div>
-    <p class="sub center" style="margin-top:18px">Budget Bhai · v1.5 · data stays on your device 🔒</p>`;
+    <p class="sub center" style="margin-top:18px">Budget Bhai · v1.6 · data stays on your device 🔒</p>`;
   },
 };

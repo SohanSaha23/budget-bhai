@@ -533,32 +533,56 @@ function splitDetailSheet(id) {
 
 /* =============== SETTLE UP =============== */
 function settleSheet(ctx) {
-  const groupId = ctx?.group || null;
+  const existing = ctx?.edit ? Store.state.settlements.find(s => s.id === ctx.edit) : null;
+  const groupId = existing ? existing.groupId : (ctx?.group || null);
   const friendId = ctx?.friend || null;
-  const memberIds = groupId ? ["me", ...Store.group(groupId).memberIds] : ["me", friendId];
-  // suggest the first outstanding debt
-  const edges = groupId ? Store.groupEdges(groupId) : Store.personalEdges(friendId);
-  const sug = edges[0];
+
+  // who can appear in the dropdowns
+  let memberIds;
+  if (groupId) memberIds = ["me", ...(Store.group(groupId)?.memberIds || [])];
+  else if (existing) memberIds = ["me", existing.from === "me" ? existing.to : existing.from];
+  else memberIds = ["me", friendId];
+
+  // for a new entry, prefill with the largest outstanding debt
+  const edges = existing ? [] : (groupId ? Store.groupEdges(groupId) : Store.personalEdges(friendId));
+  const sug = existing || edges[0];
+  const pick = (id, side) => sug && sug[side] === id ? "selected" : "";
+
   Sheet.open(`
-    <div class="sheet-title">🤝 Settle up</div>
+    <div class="sheet-title">🤝 ${existing ? "Edit payment" : "Settle up"}</div>
     <div class="row2">
       <div class="field"><label>Who paid</label>
-        <select class="input" id="st-from">${memberIds.map(id => `<option value="${id}" ${sug && sug.from === id ? "selected" : ""}>${esc(Store.friend(id)?.name || "?")}</option>`).join("")}</select></div>
+        <select class="input" id="st-from">${memberIds.map(id => `<option value="${id}" ${pick(id, "from")}>${esc(Store.friend(id)?.name || "?")}</option>`).join("")}</select></div>
       <div class="field"><label>Received by</label>
-        <select class="input" id="st-to">${memberIds.map(id => `<option value="${id}" ${sug && sug.to === id ? "selected" : ""}>${esc(Store.friend(id)?.name || "?")}</option>`).join("")}</select></div>
+        <select class="input" id="st-to">${memberIds.map(id => `<option value="${id}" ${pick(id, "to")}>${esc(Store.friend(id)?.name || "?")}</option>`).join("")}</select></div>
     </div>
     <div class="field"><label>Amount (${currencyInfo().sym})</label>
       <input class="input" type="number" id="st-amt" value="${sug ? Math.round(sug.amount * 100) / 100 : ""}"></div>
-    <div class="field"><label>Date</label><input class="input" type="date" id="st-date" value="${D.todayISO()}"></div>
-    <button class="btn primary" id="st-save">Record payment</button>`);
+    <div class="field"><label>Date</label><input class="input" type="date" id="st-date" value="${existing ? existing.date : D.todayISO()}"></div>
+    <button class="btn primary" id="st-save">${existing ? "Save changes" : "Record payment"}</button>
+    ${existing ? `<button class="btn danger mt8" id="st-del">Delete payment</button>` : ""}`);
+
   document.getElementById("st-save").onclick = () => {
     const from = document.getElementById("st-from").value, to = document.getElementById("st-to").value;
     const amt = parseFloat(document.getElementById("st-amt").value);
+    const date = document.getElementById("st-date").value;
     if (!amt || amt <= 0) return toast("Enter an amount", "✏️");
     if (from === to) return toast("Payer and receiver must differ", "⚠️");
-    Store.state.settlements.push({ id: uid(), groupId, from, to, amount: amt, date: document.getElementById("st-date").value });
-    Store.save(); toast("Payment recorded", "🤝"); Sheet.close(); App.render();
+    if (existing) {
+      Object.assign(existing, { from, to, amount: amt, date });
+      toast("Payment updated", "✅");
+    } else {
+      Store.state.settlements.push({ id: uid(), groupId, from, to, amount: amt, date });
+      toast("Payment recorded", "🤝");
+    }
+    Store.save(); Sheet.close(); App.render();
   };
+
+  if (existing) document.getElementById("st-del").onclick = () =>
+    confirmSheet("Delete this payment?", "Balances will be recalculated.", "Delete", () => {
+      Store.state.settlements = Store.state.settlements.filter(s => s.id !== existing.id);
+      Store.save(); toast("Payment deleted", "🗑️"); App.render();
+    });
 }
 
 /* =============== GOALS =============== */
