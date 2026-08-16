@@ -392,3 +392,60 @@ html[data-theme="light"] .card{box-shadow:0 1px 3px rgba(30,41,88,.07)}
 
 /* split box in add-expense */
 .split-box{background:var(--card);border:1px solid var(--border);border-radius:var(--r-md);padding:12px}
+
+/* ============ Lock screen ============ */
+#lock{position:absolute;inset:0;z-index:200;background:var(--bg);
+  display:flex;align-items:center;justify-content:center;
+  padding:calc(24px + var(--safe-area-inset-top)) 24px calc(24px + var(--safe-area-inset-bottom));
+  animation:lockIn .28s var(--ease)}
+#lock.hidden{display:none}
+@keyframes lockIn{from{opacity:0}to{opacity:1}}
+.lock-inner{width:100%;max-width:300px;text-align:center}
+.lock-inner.shake{animation:shake .42s cubic-bezier(.36,.07,.19,.97)}
+@keyframes shake{10%,90%{transform:translateX(-6px)}20%,80%{transform:translateX(7px)}
+  30%,50%,70%{transform:translateX(-9px)}40%,60%{transform:translateX(9px)}}
+.lock-logo{font-size:38px;margin-bottom:10px}
+.lock-title{font-size:19px;font-weight:700;letter-spacing:-.01em}
+.lock-sub{font-size:12.5px;color:var(--muted);margin-top:5px;min-height:18px}
+.lock-sub.bad{color:var(--red)}
+.pin-dots{display:flex;justify-content:center;gap:16px;margin:26px 0 30px}
+.pin-dots i{width:13px;height:13px;border-radius:50%;background:var(--chip);
+  border:1.5px solid var(--border2);transition:all .18s var(--ease)}
+.pin-dots i.on{background:var(--primary);border-color:var(--primary);transform:scale(1.12)}
+.pin-pad{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.pin-pad button{height:60px;border-radius:50%;background:var(--card);border:1px solid var(--border);
+  font-size:23px;font-weight:600;transition:all .12s var(--ease)}
+.pin-pad button:active{transform:scale(.9);background:var(--primary);color:#fff;border-color:var(--primary)}
+.pin-pad button.ghost{background:transparent;border:none;font-size:15px;color:var(--muted);font-weight:600}
+.pin-pad button.ghost:active{background:transparent;color:var(--primary);transform:scale(.9)}
+
+/* ============ Savings-rate KPI ============ */
+.kpi .kpi-val{font-size:34px;font-weight:800;letter-spacing:-.03em;margin:2px 0 4px}
+
+/* ============ Period-over-period delta chips ============ */
+.delta{font-size:10.5px;font-weight:700;padding:2px 6px;border-radius:6px;margin-left:5px;
+  vertical-align:1px;white-space:nowrap}
+.delta.up{background:rgba(251,113,133,.16);color:var(--red)}
+.delta.down{background:rgba(52,211,153,.16);color:var(--green)}
+.delta.flat,.delta.new{background:var(--chip);color:var(--muted)}
+
+/* ============ Calendar heatmap ============ */
+.heat-head,.heat-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px}
+.heat-head{margin-bottom:6px}
+.heat-head span{text-align:center;font-size:10px;font-weight:700;color:var(--faint)}
+.hc{aspect-ratio:1;border-radius:7px;background:var(--chip);display:flex;align-items:center;
+  justify-content:center;font-size:10px;color:var(--faint);transition:transform .15s var(--ease)}
+.hc:active{transform:scale(.88)}
+.hc.empty{background:transparent}
+.hc.lv0{background:var(--chip)}
+.hc.lv1{background:color-mix(in srgb,var(--primary) 22%,var(--chip));color:var(--muted)}
+.hc.lv2{background:color-mix(in srgb,var(--primary) 45%,var(--chip));color:var(--text)}
+.hc.lv3{background:color-mix(in srgb,var(--primary) 70%,var(--chip));color:#fff}
+.hc.lv4{background:var(--primary);color:#fff}
+.hc.today{outline:2px solid var(--accent);outline-offset:1px}
+.heat-legend{display:flex;align-items:center;justify-content:flex-end;gap:4px;margin-top:10px;
+  font-size:10px;color:var(--faint)}
+.heat-legend i{width:12px;height:12px;border-radius:4px;display:block}
+
+/* line charts */
+.linechart .ln{stroke-dasharray:1200;stroke-dashoffset:1200;animation:dash 1.2s var(--ease) forwards}

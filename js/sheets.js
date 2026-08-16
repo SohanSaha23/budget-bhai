@@ -224,7 +224,7 @@ const TxSheet = {
       }
       splitData = {
         id: uid(), groupId: null, desc: st.payee.trim() || Store.cat(st.catId).name,
-        amount, paidBy: "me", shares, date: st.date,
+        categoryId: st.catId, amount, paidBy: "me", shares, date: st.date,
       };
     }
 
@@ -235,6 +235,8 @@ const TxSheet = {
     };
     if (st.id) { Store.updateTransaction(st.id, data); toast("Saved", "✅"); }
     else {
+      // stamp the clock so the time-of-day breakdown has something to work with
+      data.time = new Date().toTimeString().slice(0, 5);
       Store.addTransaction(data);
       if (splitData) { Store.state.splitExpenses.push(splitData); Store.save(); }
       toast(splitData ? "Expense added · split tracked 🧾" : st.type === "expense" ? "Expense added" : st.type === "income" ? "Income added" : "Transfer added", "✅");
@@ -431,9 +433,13 @@ function splitSheet(ctx) {
     </div>`;
   };
 
+  let catId = (s.categories.find(c => c.type === "expense") || {}).id;
   Sheet.open(`
     <div class="sheet-title">Split an expense${group ? " · " + esc(group.name) : ""}</div>
     <div class="field"><label>Description</label><input class="input" id="sp-desc" placeholder="e.g. Dinner at Social"></div>
+    <div class="field"><label>Category</label>
+      <div class="chips" id="sp-cats">${categoryChips("expense", catId)}</div>
+    </div>
     <div class="row2">
       <div class="field"><label>Amount (${currencyInfo().sym})</label><input class="input" type="number" id="sp-total" placeholder="0"></div>
       <div class="field"><label>Date</label><input class="input" type="date" id="sp-date" value="${D.todayISO()}"></div>
@@ -455,6 +461,13 @@ function splitSheet(ctx) {
     <button class="btn primary" id="sp-save">Add split expense</button>`);
 
   const sheetEl = document.getElementById("sheet");
+  const catsEl = document.getElementById("sp-cats");
+  catsEl.onclick = (e) => {
+    const b = e.target.closest("[data-cat]");
+    if (!b) return;
+    catId = b.dataset.cat;
+    catsEl.querySelectorAll(".chip").forEach(c => c.classList.toggle("on", c.dataset.cat === catId));
+  };
   sheetEl.querySelectorAll("[data-m]").forEach(b => b.onclick = () => {
     method = b.dataset.m;
     sheetEl.querySelectorAll("[data-m]").forEach(x => x.classList.toggle("on", x.dataset.m === method));
@@ -495,14 +508,14 @@ function splitSheet(ctx) {
       const sum = shares.reduce((s2, x) => s2 + x.amount, 0);
       if (Math.abs(sum - total) > 0.01) return toast("Shares must add up to the total", "⚠️");
     }
-    Store.state.splitExpenses.push({ id: uid(), groupId, desc, amount: total, paidBy: payer, shares, date });
+    Store.state.splitExpenses.push({ id: uid(), groupId, desc, categoryId: catId, amount: total, paidBy: payer, shares, date });
 
     // optionally reflect my share in the personal ledger
     if (document.getElementById("sp-ledger").checked) {
       const mine = shares.find(x => x.id === "me");
       if (mine && mine.amount > 0 && Store.state.accounts.length) {
         Store.addTransaction({
-          type: "expense", amount: mine.amount, categoryId: "c_other",
+          type: "expense", amount: mine.amount, categoryId: catId,
           accountId: Store.state.accounts[0].id, date, payee: desc, note: "My share of split",
         });
       }
@@ -514,10 +527,11 @@ function splitSheet(ctx) {
 function splitDetailSheet(id) {
   const e = Store.state.splitExpenses.find(x => x.id === id);
   if (!e) return;
+  const sc = Store.cat(e.categoryId || "c_other");
   Sheet.open(`
-    <div class="sheet-title">🧾 ${esc(e.desc)}</div>
+    <div class="sheet-title">${sc.emoji} ${esc(e.desc)}</div>
     <div class="center h1 money mb8">${fmt(e.amount)}</div>
-    <div class="sub center mb8">${esc(Store.friend(e.paidBy)?.name || "?")} paid · ${D.human(e.date)}${e.groupId ? " · " + esc(Store.group(e.groupId)?.name || "") : ""}</div>
+    <div class="sub center mb8">${esc(sc.name)} · ${esc(Store.friend(e.paidBy)?.name || "?")} paid · ${D.human(e.date)}${e.groupId ? " · " + esc(Store.group(e.groupId)?.name || "") : ""}</div>
     <div class="divider"></div>
     ${e.shares.map(sh => `<div class="share-row">
       <div class="pavatar" style="background:${Store.friend(sh.id)?.color || "#888"};width:32px;height:32px;font-size:12px">${esc(initials(Store.friend(sh.id)?.name || "?"))}</div>
@@ -775,6 +789,50 @@ function profileSheet() {
     if (!n) return toast("Enter your name", "✏️");
     Store.state.settings.name = n; Store.save();
     toast("Hi, " + n + "!", "👋"); Sheet.close(); App.render();
+  };
+}
+
+async function securitySheet() {
+  const s = Store.state.settings;
+  const bioOk = await Lock.bioAvailable();
+  Sheet.open(`
+    <div class="sheet-title">🔒 App lock</div>
+    <p class="sub center" style="margin-bottom:14px">Asks for a PIN when you open Budget Bhai, and again after a minute in the background.</p>
+    <div class="menu">
+      <button class="menu-item" id="sec-toggle">
+        <span class="em">${s.lock ? "🔓" : "🔒"}</span>
+        <span class="grow">${s.lock ? "Turn off app lock" : "Set up a PIN"}</span>
+        <span class="hint">${s.lock ? "on" : "off"}</span><span class="chev">›</span>
+      </button>
+      ${s.lock ? `<button class="menu-item" id="sec-change">
+        <span class="em">🔑</span><span class="grow">Change PIN</span><span class="chev">›</span></button>` : ""}
+      ${s.lock && bioOk ? `<div class="menu-item">
+        <span class="em">☝️</span><span class="grow">Unlock with fingerprint</span>
+        <input type="checkbox" id="sec-bio" ${s.biometric ? "checked" : ""} style="width:19px;height:19px;accent-color:var(--primary)"></div>` : ""}
+    </div>
+    ${s.lock && !bioOk ? `<p class="sub center">Fingerprint unlock isn't available on this device.</p>` : ""}
+    <p class="sub center" style="margin-top:10px">⚠️ There's no way to recover a forgotten PIN — keep a backup of your data.</p>
+    <button class="btn ghost mt8" data-action="close-sheet">Done</button>`);
+
+  document.getElementById("sec-toggle").onclick = () => {
+    if (s.lock) {
+      confirmSheet("Turn off app lock?", "Anyone with your phone will be able to open Budget Bhai.", "Turn off", () => {
+        Store.clearPin(); toast("App lock removed", "🔓"); App.render();
+      });
+    } else {
+      Sheet.close();
+      Lock.startSet(() => securitySheet());
+    }
+  };
+  const chg = document.getElementById("sec-change");
+  if (chg) chg.onclick = () => { Sheet.close(); Lock.startSet(() => securitySheet()); };
+
+  const bio = document.getElementById("sec-bio");
+  if (bio) bio.onchange = async () => {
+    if (bio.checked) {
+      if (await Lock.bioVerify()) { s.biometric = true; Store.save(); toast("Fingerprint unlock on", "☝️"); }
+      else { bio.checked = false; toast("Couldn't verify fingerprint", "⚠️"); }
+    } else { s.biometric = false; Store.save(); toast("Fingerprint unlock off"); }
   };
 }
 

@@ -69,6 +69,9 @@ function periodSections(items, period) {
     .map(([, v]) => v);
 }
 
+/* split expenses created before categories existed fall back to "Other" */
+function splitCat(e) { return Store.cat(e.categoryId || "c_other"); }
+
 /* one row on a friend's page — shows only the amount owed between you two */
 function friendActivityRow(it) {
   const f = Store.friend(UI.friendId);
@@ -85,11 +88,12 @@ function friendActivityRow(it) {
   }
   const iPaid = it.paidBy === "me";
   const whose = iPaid ? esc(f.name) + "'s share" : "your share";
+  const c = splitCat(it);
   return `<div class="tx" data-action="split-detail" data-id="${it.id}">
-    <div class="emo" style="background:${tint("#7c6bff", .16)}">🧾</div>
+    <div class="emo" style="background:${tint(c.color, .16)}">${c.emoji}</div>
     <div class="mid">
       <div class="nm">${esc(it.desc)}</div>
-      <div class="meta">${iPaid ? "You" : esc(f.name)} paid ${fmt(it.total)} · ${it.ways} ways · ${whose}</div>
+      <div class="meta">${esc(c.name)} · ${iPaid ? "You" : esc(f.name)} paid ${fmt(it.total)} · ${whose}</div>
     </div>
     <div class="amt money ${iPaid ? "pos" : "neg"}">${iPaid ? "+" : "−"}${fmt(it.share)}
       <div class="sub" style="font-weight:600;text-align:right">${iPaid ? "owes you" : "you owe"}</div>
@@ -111,11 +115,12 @@ function groupActivityRow(it) {
   }
   const mine = it.shares.find(s => s.id === "me");
   const iPaid = it.paidBy === "me";
+  const c = splitCat(it);
   return `<div class="tx" data-action="split-detail" data-id="${it.id}">
-    <div class="emo" style="background:${tint("#7c6bff", .16)}">🧾</div>
+    <div class="emo" style="background:${tint(c.color, .16)}">${c.emoji}</div>
     <div class="mid">
       <div class="nm">${esc(it.desc)}</div>
-      <div class="meta">${iPaid ? "You" : esc(Store.friend(it.paidBy)?.name || "?")} paid · ${it.shares.length} ways${mine ? " · your share " + fmt(mine.amount) : " · not your split"}</div>
+      <div class="meta">${esc(c.name)} · ${iPaid ? "You" : esc(Store.friend(it.paidBy)?.name || "?")} paid${mine ? " · your share " + fmt(mine.amount) : " · not your split"}</div>
     </div>
     <div class="amt money">${fmt(it.amount)}</div>
   </div>`;
@@ -354,8 +359,19 @@ const Views = {
 
   /* ================= STATS ================= */
   /* the active date range for the selected period, anchored at UI.stats.anchor */
-  statsRange() {
-    const a = UI.stats.anchor, p = UI.stats.period;
+  statsRange() { return Views.rangeFor(UI.stats.period, UI.stats.anchor); },
+
+  /* the equivalent range one step earlier — used for period-over-period deltas */
+  prevStatsRange() {
+    const p = UI.stats.period, a = UI.stats.anchor;
+    const back = p === "daily" ? D.addDays(a, -1)
+      : p === "weekly" ? D.addDays(a, -7)
+      : p === "yearly" ? D.addMonths(a, -12)
+      : D.addMonths(a, -1);
+    return Views.rangeFor(p, back);
+  },
+
+  rangeFor(p, a) {
     if (p === "daily") return { from: a, to: a, label: D.human(a) };
     if (p === "weekly") {
       const d = D.parse(a), off = (d.getDay() + 6) % 7; // Monday start
@@ -418,10 +434,31 @@ const Views = {
   stats() {
     const type = UI.statsType;
     const { from, to, label } = Views.statsRange();
+    const prev = Views.prevStatsRange();
     const inc = Store.rangeTotal(from, to, "income"), exp = Store.rangeTotal(from, to, "expense");
     const items = Store.categorySpendRange(from, to, type);
     const total = items.reduce((s, i) => s + i.amt, 0);
     const trend = Views.statsTrend();
+    const unit = { daily: "day", weekly: "week", monthly: "month", yearly: "year" }[UI.stats.period];
+
+    const deltas = Store.categoryDeltas(from, to, prev.from, prev.to, type);
+    const merchants = type === "expense" ? Store.merchantStats(from, to) : [];
+    const topMerchant = merchants.length ? merchants[0].total : 0;
+
+    // heatmap always shows the month the anchor sits in
+    const [hy, hm] = [Number(UI.stats.anchor.slice(0, 4)), Number(UI.stats.anchor.slice(5, 7)) - 1];
+    const hFrom = UI.stats.anchor.slice(0, 7) + "-01";
+    const hTo = UI.stats.anchor.slice(0, 7) + "-" + String(D.daysInMonth(hy, hm)).padStart(2, "0");
+
+    const weekday = Store.weekdayStats(from, to);
+    const busiest = weekday.reduce((a, b) => b.total > a.total ? b : a, weekday[0]);
+    const tod = Store.timeOfDayStats(from, to);
+    const todMax = Math.max(...tod.blocks.map(b => b.total), 1);
+
+    const nw = Store.netWorthSeries(6);
+    const nwChange = nw[nw.length - 1].value - nw[0].value;
+    const anomalies = Store.anomalies(from, to);
+    const sr = Store.savingsRate(from, to);
 
     const donutItems = items.slice(0, 6).map(i => ({ label: i.cat.name, value: i.amt, color: i.cat.color }));
     const rest = items.slice(6).reduce((s, i) => s + i.amt, 0);
@@ -443,6 +480,30 @@ const Views = {
       <button class="${type === "income" ? "on inc" : ""}" data-action="stats-type" data-type="income">Income</button>
     </div>
 
+    ${sr.inc > 0 || sr.exp > 0 ? `<div class="card kpi">
+      <div class="card-row">
+        <div>
+          <div class="sub">Savings rate</div>
+          <div class="kpi-val ${sr.rate === null ? "" : sr.rate >= 20 ? "pos" : sr.rate >= 0 ? "warn" : "neg"}">
+            ${sr.rate === null ? "—" : sr.rate + "%"}
+          </div>
+          <div class="sub">${sr.rate === null ? "no income recorded this " + unit
+            : sr.rate >= 20 ? "great — you're keeping a healthy share"
+            : sr.rate >= 0 ? "you kept " + fmt(sr.saved) + " of " + fmt(sr.inc)
+            : "you spent " + fmt(-sr.saved) + " more than you earned"}</div>
+        </div>
+        ${Charts.ring(Math.max(0, Math.min(100, sr.rate || 0)), 76,
+          sr.rate === null ? "var(--faint)" : sr.rate >= 20 ? "var(--green)" : sr.rate >= 0 ? "var(--amber)" : "var(--red)",
+          sr.rate === null ? "—" : sr.rate + "%")}
+      </div>
+      <div class="divider"></div>
+      <div class="card-row">
+        <span class="sub">In <b class="pos money">${fmt(sr.inc)}</b></span>
+        <span class="sub">Out <b class="neg money">${fmt(sr.exp)}</b></span>
+        <span class="sub">Net <b class="${sr.saved >= 0 ? "pos" : "neg"} money">${fmt(sr.saved, true)}</b></span>
+      </div>
+    </div>` : ""}
+
     <div class="card">
       ${items.length ? `
       <div class="donut-wrap">
@@ -454,6 +515,66 @@ const Views = {
       </div>` : '<div class="empty"><div class="big">📊</div>No ' + type + 's in this period.</div>'}
     </div>
 
+    ${items.length ? `<div class="sec"><span class="h2">Category breakdown</span><span class="sub">vs previous ${unit}</span></div>
+    <div class="card flat stagger" style="padding:10px 12px">
+      ${deltas.map(i => {
+        const pc = total ? Math.round(i.amt / total * 100) : 0;
+        const chip = i.pct === null
+          ? `<span class="delta new">new</span>`
+          : i.pct === 0 ? `<span class="delta flat">±0%</span>`
+          : `<span class="delta ${i.pct > 0 ? "up" : "down"}">${i.pct > 0 ? "▲" : "▼"} ${Math.abs(i.pct)}%</span>`;
+        return `<div class="rank" data-action="stats-cat" data-cat="${i.cat.id}">
+          <div class="emo" style="background:${tint(i.cat.color, .16)}">${i.cat.emoji}</div>
+          <div class="mid">
+            <div class="nm"><span>${esc(i.cat.name)} ${chip}</span><b class="money">${fmt(i.amt)}</b></div>
+            <div class="bar"><i style="width:${pc}%;background:${i.cat.color}"></i></div>
+            <div class="sub" style="margin-top:4px;font-size:11px">${pc}% of total · was ${fmt(i.prev)}</div>
+          </div>
+        </div>`;
+      }).join("")}
+    </div>` : ""}
+
+    ${merchants.length ? `<div class="sec"><span class="h2">Top places</span><span class="sub">${merchants.length} in total</span></div>
+    <div class="card flat stagger" style="padding:10px 12px">
+      ${merchants.slice(0, 8).map(mm => {
+        const c = Store.cat(mm.catId);
+        const pc = topMerchant ? Math.round(mm.total / topMerchant * 100) : 0;
+        return `<div class="rank">
+          <div class="emo" style="background:${tint(c.color, .16)}">${c.emoji}</div>
+          <div class="mid">
+            <div class="nm"><span>${esc(mm.name)}</span><b class="money">${fmt(mm.total)}</b></div>
+            <div class="bar"><i style="width:${pc}%;background:${c.color}"></i></div>
+            <div class="sub" style="margin-top:4px;font-size:11px">${mm.count} ${mm.count === 1 ? "time" : "times"} · ${fmt(Math.round(mm.total / mm.count))} avg</div>
+          </div>
+        </div>`;
+      }).join("")}
+    </div>` : ""}
+
+    ${UI.stats.period !== "yearly" ? `<div class="sec"><span class="h2">Spending calendar</span><span class="sub">${D.monthName(hy, hm, true)}</span></div>
+    <div class="card">
+      ${Charts.calendarHeat(hy, hm, Store.dailyMap(hFrom, hTo))}
+    </div>` : ""}
+
+    ${weekday.some(d => d.total > 0) ? `<div class="sec"><span class="h2">Day of week</span></div>
+    <div class="card">
+      ${Charts.vbars(weekday)}
+      <div class="sub center">${busiest.total > 0 ? `<b>${busiest.label}</b> is your heaviest day — ${fmt(busiest.total)} across ${busiest.count} ${busiest.count === 1 ? "expense" : "expenses"}` : ""}</div>
+    </div>` : ""}
+
+    ${tod.timed > 0 ? `<div class="sec"><span class="h2">Time of day</span></div>
+    <div class="card flat" style="padding:10px 12px">
+      ${tod.blocks.map(b => {
+        const pc = todMax ? Math.round(b.total / todMax * 100) : 0;
+        return `<div class="rank">
+          <div class="emo" style="background:var(--chip)">${b.emoji}</div>
+          <div class="mid">
+            <div class="nm"><span>${b.label} <span class="sub">${b.hint}</span></span><b class="money">${fmt(b.total)}</b></div>
+            <div class="bar"><i style="width:${pc}%;background:var(--primary)"></i></div>
+          </div>
+        </div>`;
+      }).join("")}
+    </div>` : ""}
+
     <div class="sec"><span class="h2">${trend.title}</span></div>
     <div class="card">
       ${Charts.incExpBars(trend.bars)}
@@ -464,16 +585,26 @@ const Views = {
       </div>
     </div>
 
-    ${items.length ? `<div class="sec"><span class="h2">Category breakdown</span></div>
-    <div class="card flat stagger" style="padding:10px 12px">
-      ${items.map(i => {
-        const pc = total ? Math.round(i.amt / total * 100) : 0;
-        return `<div class="rank" data-action="stats-cat" data-cat="${i.cat.id}">
-          <div class="emo" style="background:${tint(i.cat.color, .16)}">${i.cat.emoji}</div>
+    <div class="sec"><span class="h2">Net worth</span><span class="sub">last 6 months</span></div>
+    <div class="card">
+      <div class="card-row mb8">
+        <span class="h2 money">${fmt(nw[nw.length - 1].value)}</span>
+        <span class="sub ${nwChange >= 0 ? "pos" : "neg"}"><b>${fmt(nwChange, true)}</b> ${nwChange >= 0 ? "growth" : "drop"} over 6 months</span>
+      </div>
+      ${Charts.line([{ values: nw.map(p => p.value), color: "var(--primary)", fill: true }], nw.map(p => p.label), 340, 150)}
+    </div>
+
+    ${anomalies.length ? `<div class="sec"><span class="h2">Unusual spending</span></div>
+    <div class="card flat stagger" style="padding:8px 10px">
+      ${anomalies.map(a => {
+        const c = Store.cat(a.tx.categoryId);
+        return `<div class="tx" data-action="tx-detail" data-id="${a.tx.id}">
+          <div class="emo" style="background:${tint("#fbbf24", .18)}">⚠️</div>
           <div class="mid">
-            <div class="nm"><span>${esc(i.cat.name)} <span class="sub">${pc}%</span></span><b class="money">${fmt(i.amt)}</b></div>
-            <div class="bar"><i style="width:${pc}%;background:${i.cat.color}"></i></div>
+            <div class="nm">${esc(a.tx.payee || c.name)}</div>
+            <div class="meta">${a.times.toFixed(1)}× your usual ${esc(c.name)} (${fmt(Math.round(a.mean))}) · ${D.short(a.tx.date)}</div>
           </div>
+          <div class="amt neg money">${fmt(a.tx.amount)}</div>
         </div>`;
       }).join("")}
     </div>` : ""}`;
@@ -523,9 +654,40 @@ const Views = {
     </div>
     ${monthSelector()}
     ${overall ? budCard(overall) : `<button class="btn ghost mb8" data-action="add-budget">＋ Set an overall monthly budget</button>`}
+    ${overall ? Views.burndownCard(overall) : ""}
     <div class="sec"><span class="h2">Category budgets</span></div>
     <div class="stagger">
     ${others.length ? others.map(budCard).join("") : '<div class="empty"><div class="big">🎯</div>No category budgets yet.<br>Tap + to create one.</div>'}
+    </div>`;
+  },
+
+  /* actual spend pace vs the even-burn line for the selected month */
+  burndownCard(budget) {
+    const { y, m } = UI.month;
+    const { points, dim } = Store.burndown(y, m);
+    if (!points.length) return "";
+    const ideal = points.map(p => budget.amount / dim * p.day);
+    const actual = points.map(p => p.cum);
+    const last = points[points.length - 1];
+    const drift = Math.round(last.cum - budget.amount / dim * last.day);
+    const projected = Math.round(last.cum / last.day * dim);
+    const labels = points.map(p => (p.day === 1 || p.day % 7 === 0) ? String(p.day) : "");
+    const over = drift > 0;
+
+    return `<div class="card">
+      <div class="card-row mb8">
+        <span class="sub"><b>Spending pace</b></span>
+        <span class="sub ${over ? "neg" : "pos"}"><b>${over ? "▲ " + fmt(drift) + " ahead of pace" : "▼ " + fmt(-drift) + " under pace"}</b></span>
+      </div>
+      ${Charts.line([
+        { values: ideal, color: "var(--faint)", dashed: true, dot: false },
+        { values: actual, color: over ? "var(--red)" : "var(--green)", fill: true },
+      ], labels, 340, 150, { yMax: Math.max(budget.amount, ...actual) })}
+      <div class="card-row mt8">
+        <span class="sub"><span style="color:var(--faint)">┈</span> even pace</span>
+        <span class="sub"><span style="color:${over ? "var(--red)" : "var(--green)"}">●</span> actual</span>
+        <span class="sub">projected <b class="money ${projected > budget.amount ? "neg" : "pos"}">${fmt(projected)}</b></span>
+      </div>
     </div>`;
   },
 
@@ -833,6 +995,7 @@ const Views = {
     </div>
 
     <div class="menu">
+      ${item("🔒", "App lock", s.lock ? (s.biometric ? "PIN + fingerprint" : "PIN on") : "off", "open-security")}
       ${item("🎨", "Theme", s.theme === "dark" ? "Dark" : "Light", "toggle-theme")}
       ${item("💱", "Currency", cur.code + " " + cur.sym, "pick-currency")}
     </div>
@@ -844,6 +1007,6 @@ const Views = {
       ${item("🧪", "Reset demo data", "", "reset-demo")}
       ${item("🗑️", "Erase everything", "", "erase-all")}
     </div>
-    <p class="sub center" style="margin-top:18px">Budget Bhai · v1.6 · data stays on your device 🔒</p>`;
+    <p class="sub center" style="margin-top:18px">Budget Bhai · v1.7 · data stays on your device 🔒</p>`;
   },
 };

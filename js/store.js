@@ -78,7 +78,10 @@ const Store = {
 
   blank() {
     return {
-      settings: { name: "You", currency: "INR", theme: "dark", demo: false },
+      settings: {
+        name: "You", currency: "INR", theme: "dark", demo: false,
+        lock: false, pinHash: "", pinSalt: "", biometric: false,
+      },
       accounts: [], categories: DEFAULT_CATEGORIES.map(c => ({ ...c })),
       transactions: [], budgets: [], friends: [], groups: [],
       splitExpenses: [], settlements: [], goals: [], recurring: [],
@@ -88,9 +91,42 @@ const Store = {
   load() {
     try {
       const raw = localStorage.getItem(LS_KEY);
-      if (raw) { this.state = JSON.parse(raw); return; }
+      if (raw) { this.state = JSON.parse(raw); this.migrate(); return; }
     } catch (e) { /* corrupted -> reseed */ }
     this.state = this.seedDemo();
+    this.save();
+  },
+
+  /* fill in fields added by later versions so older saves keep working */
+  migrate() {
+    const def = this.blank();
+    this.state.settings = Object.assign({}, def.settings, this.state.settings);
+    for (const key of Object.keys(def)) {
+      if (key !== "settings" && !Array.isArray(this.state[key])) this.state[key] = def[key];
+    }
+  },
+
+  /* ---------- app lock ---------- */
+  async hashPin(pin, salt) {
+    const bytes = new TextEncoder().encode(salt + ":" + pin);
+    const buf = await crypto.subtle.digest("SHA-256", bytes);
+    return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+  },
+  async setPin(pin) {
+    const salt = [...crypto.getRandomValues(new Uint8Array(8))]
+      .map(b => b.toString(16).padStart(2, "0")).join("");
+    this.state.settings.pinSalt = salt;
+    this.state.settings.pinHash = await this.hashPin(pin, salt);
+    this.state.settings.lock = true;
+    this.save();
+  },
+  async checkPin(pin) {
+    const s = this.state.settings;
+    if (!s.pinHash) return false;
+    return (await this.hashPin(pin, s.pinSalt)) === s.pinHash;
+  },
+  clearPin() {
+    Object.assign(this.state.settings, { lock: false, pinHash: "", pinSalt: "", biometric: false });
     this.save();
   },
 
@@ -136,6 +172,148 @@ const Store = {
 
   monthTotal(y, m, type) {
     return this.monthTx(y, m, type).reduce((s, t) => s + t.amount, 0);
+  },
+
+  /* ---------- analytics ---------- */
+
+  /* net worth at the end of a given day (respects excluded accounts) */
+  netWorthAt(iso) {
+    const inc = new Set(this.state.accounts.filter(a => !a.excludeTotal).map(a => a.id));
+    let bal = this.state.accounts.filter(a => !a.excludeTotal)
+      .reduce((s, a) => s + (a.initialBalance || 0), 0);
+    for (const t of this.state.transactions) {
+      if (t.date > iso) continue;
+      if (t.type === "income" && inc.has(t.accountId)) bal += t.amount;
+      else if (t.type === "expense" && inc.has(t.accountId)) bal -= t.amount;
+      else if (t.type === "transfer") {
+        if (inc.has(t.accountId)) bal -= t.amount;
+        if (inc.has(t.toAccountId)) bal += t.amount;
+      }
+    }
+    return bal;
+  },
+
+  /* month-end net worth for the last n months, oldest first */
+  netWorthSeries(n) {
+    const now = new Date(), out = [];
+    for (let i = n - 1; i >= 0; i--) {
+      const end = new Date(now.getFullYear(), now.getMonth() - i + 1, 0);
+      const iso = i === 0 ? D.todayISO() : D.toISO(end);
+      out.push({ label: end.toLocaleDateString("en-IN", { month: "short" }), value: this.netWorthAt(iso) });
+    }
+    return out;
+  },
+
+  /* income vs expense as a savings-rate KPI */
+  savingsRate(from, to) {
+    const inc = this.rangeTotal(from, to, "income");
+    const exp = this.rangeTotal(from, to, "expense");
+    return { inc, exp, saved: inc - exp, rate: inc > 0 ? Math.round((inc - exp) / inc * 100) : null };
+  },
+
+  /* who you actually pay, ranked */
+  merchantStats(from, to) {
+    const map = {};
+    for (const t of this.rangeTx(from, to, "expense")) {
+      const key = (t.payee || "").trim() || this.cat(t.categoryId).name;
+      if (!map[key]) map[key] = { name: key, total: 0, count: 0, catId: t.categoryId };
+      map[key].total += t.amount;
+      map[key].count++;
+    }
+    return Object.values(map).sort((a, b) => b.total - a.total);
+  },
+
+  /* spend by day of week (Mon first) */
+  weekdayStats(from, to) {
+    const tot = [0, 0, 0, 0, 0, 0, 0], cnt = [0, 0, 0, 0, 0, 0, 0];
+    for (const t of this.rangeTx(from, to, "expense")) {
+      const i = (D.parse(t.date).getDay() + 6) % 7;
+      tot[i] += t.amount; cnt[i]++;
+    }
+    return ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+      .map((label, i) => ({ label, total: tot[i], count: cnt[i] }));
+  },
+
+  /* spend by part of day — only counts transactions that carry a time */
+  timeOfDayStats(from, to) {
+    const blocks = [
+      { label: "Morning", hint: "5am–11am", lo: 5, hi: 11, emoji: "🌅", total: 0, count: 0 },
+      { label: "Afternoon", hint: "12pm–4pm", lo: 12, hi: 16, emoji: "☀️", total: 0, count: 0 },
+      { label: "Evening", hint: "5pm–9pm", lo: 17, hi: 21, emoji: "🌆", total: 0, count: 0 },
+      { label: "Night", hint: "10pm–4am", lo: 22, hi: 28, emoji: "🌙", total: 0, count: 0 },
+    ];
+    let timed = 0;
+    for (const t of this.rangeTx(from, to, "expense")) {
+      if (!t.time) continue;
+      timed++;
+      let h = parseInt(t.time.slice(0, 2), 10);
+      if (h < 5) h += 24;                       // after-midnight counts as night
+      const b = blocks.find(x => h >= x.lo && h <= x.hi) || blocks[3];
+      b.total += t.amount; b.count++;
+    }
+    return { blocks, timed };
+  },
+
+  /* expenses that are unusually large for their own category */
+  anomalies(from, to) {
+    const since = D.addDays(D.todayISO(), -180);
+    const hist = {};
+    for (const t of this.state.transactions) {
+      if (t.type !== "expense" || t.date < since) continue;
+      (hist[t.categoryId] = hist[t.categoryId] || []).push(t.amount);
+    }
+    const out = [];
+    for (const t of this.rangeTx(from, to, "expense")) {
+      const arr = hist[t.categoryId];
+      if (!arr || arr.length < 5) continue;
+      const mean = arr.reduce((s, a) => s + a, 0) / arr.length;
+      if (mean <= 0) continue;
+      const times = t.amount / mean;
+      if (times >= 2.5 && t.amount >= 300) out.push({ tx: t, mean, times });
+    }
+    return out.sort((a, b) => b.times - a.times).slice(0, 8);
+  },
+
+  /* per-category change vs the previous equivalent period */
+  categoryDeltas(from, to, pFrom, pTo, type) {
+    const now = {}, prev = {};
+    for (const t of this.rangeTx(from, to, type)) now[t.categoryId] = (now[t.categoryId] || 0) + t.amount;
+    for (const t of this.rangeTx(pFrom, pTo, type)) prev[t.categoryId] = (prev[t.categoryId] || 0) + t.amount;
+    return Object.keys(now).map(cid => {
+      const cur = now[cid], was = prev[cid] || 0;
+      return {
+        cat: this.cat(cid), amt: cur, prev: was,
+        pct: was > 0 ? Math.round((cur - was) / was * 100) : null,   // null = new this period
+      };
+    }).sort((a, b) => b.amt - a.amt);
+  },
+
+  /* cumulative spend through the month vs the even-pace line */
+  burndown(y, m) {
+    const dim = D.daysInMonth(y, m);
+    const prefix = y + "-" + String(m + 1).padStart(2, "0");
+    const today = D.todayISO();
+    const perDay = {};
+    for (const t of this.state.transactions) {
+      if (t.type !== "expense" || !t.date.startsWith(prefix)) continue;
+      perDay[t.date] = (perDay[t.date] || 0) + t.amount;
+    }
+    const points = [];
+    let cum = 0;
+    for (let d = 1; d <= dim; d++) {
+      const iso = prefix + "-" + String(d).padStart(2, "0");
+      if (iso > today) break;
+      cum += perDay[iso] || 0;
+      points.push({ day: d, cum });
+    }
+    return { points, dim };
+  },
+
+  /* per-day spend totals across a range (calendar heatmap) */
+  dailyMap(from, to) {
+    const map = {};
+    for (const t of this.rangeTx(from, to, "expense")) map[t.date] = (map[t.date] || 0) + t.amount;
+    return map;
   },
 
   /* inclusive date-range queries (stats periods) */
@@ -276,10 +454,12 @@ const Store = {
       const theirs = e.shares.find(s => s.id === friendId);
       if (e.paidBy === "me" && theirs) {
         out.push({ kind: "expense", id: e.id, date: e.date, desc: e.desc, paidBy: "me",
-          total: e.amount, ways: e.shares.length, share: theirs.amount, delta: theirs.amount });
+          categoryId: e.categoryId, total: e.amount, ways: e.shares.length,
+          share: theirs.amount, delta: theirs.amount });
       } else if (e.paidBy === friendId && mine) {
         out.push({ kind: "expense", id: e.id, date: e.date, desc: e.desc, paidBy: friendId,
-          total: e.amount, ways: e.shares.length, share: mine.amount, delta: -mine.amount });
+          categoryId: e.categoryId, total: e.amount, ways: e.shares.length,
+          share: mine.amount, delta: -mine.amount });
       }
     }
     for (const s of this.state.settlements) {
@@ -371,6 +551,24 @@ const Store = {
       else out.push({ ic: "⚖️", tone: "", t: "Steady spending", d: "You're on pace with last month — within " + Math.abs(diff) + "%." });
     }
 
+    // unusually large spending this month — high priority, surfaced early
+    const monthFrom = y + "-" + String(m + 1).padStart(2, "0") + "-01";
+    const odd = this.anomalies(monthFrom, D.todayISO());
+    if (odd.length) {
+      const a = odd[0], c = this.cat(a.tx.categoryId);
+      out.push({ ic: "⚠️", tone: "warn", t: "Unusual " + c.name + " spend",
+        d: (a.tx.payee || c.name) + " cost " + fmt(a.tx.amount) + " — about " + a.times.toFixed(1) + "× your usual " + fmt(Math.round(a.mean)) + "." });
+    }
+
+    // savings rate
+    const sr = this.savingsRate(monthFrom, D.todayISO());
+    if (sr.rate !== null && sr.inc > 0) {
+      out.push({ ic: sr.rate >= 20 ? "🏦" : "🧮", tone: sr.rate >= 20 ? "good" : sr.rate >= 0 ? "" : "bad",
+        t: "Savings rate " + sr.rate + "%",
+        d: sr.rate >= 0 ? "You've kept " + fmt(sr.saved) + " of the " + fmt(sr.inc) + " you earned this month."
+          : "You've spent " + fmt(-sr.saved) + " more than you earned this month." });
+    }
+
     // projection
     if (day >= 3 && spent > 0) {
       const dim = D.daysInMonth(y, m);
@@ -415,7 +613,7 @@ const Store = {
       const tot = up.filter(r => r.type === "expense").reduce((s, r) => s + r.amount, 0);
       if (tot > 0) out.push({ ic: "📅", tone: "warn", t: up.length + " bill" + (up.length > 1 ? "s" : "") + " due soon", d: fmt(tot) + " in recurring payments within 7 days." });
     }
-    return out.slice(0, 6);
+    return out.slice(0, 8);
   },
 
   /* ---------- export ---------- */
@@ -450,8 +648,21 @@ const Store = {
       { id: "a_upi", name: "Paytm UPI", type: "wallet", initialBalance: 1200, excludeTotal: false },
     ];
 
+    // plausible clock times so the time-of-day breakdown has data to show
+    const TIME_HINTS = {
+      c_food: [8, 13, 20], c_groc: [11, 18, 19], c_trans: [9, 18, 21],
+      c_ent: [16, 20, 22], c_shop: [12, 15, 21], c_care: [11, 16, 17],
+      c_bills: [10, 11, 12], c_health: [7, 8, 18], c_subs: [10, 10, 10],
+      c_rent: [10, 10, 10], c_salary: [10, 10, 10], c_refund: [13, 14, 15],
+    };
+    const timeFor = (categoryId) => {
+      const hs = TIME_HINTS[categoryId] || [12, 15, 18];
+      const h = hs[between(0, hs.length - 1)];
+      return String(h).padStart(2, "0") + ":" + String(between(0, 59)).padStart(2, "0");
+    };
     const tx = (type, amount, categoryId, accountId, offset, payee, note) =>
-      s.transactions.push({ id: uid(), type, amount, categoryId, accountId, date: iso(offset), payee: payee || "", note: note || "" });
+      s.transactions.push({ id: uid(), type, amount, categoryId, accountId, date: iso(offset),
+        time: timeFor(categoryId), payee: payee || "", note: note || "" });
     const trf = (amount, from, to, offset, note) =>
       s.transactions.push({ id: uid(), type: "transfer", amount, categoryId: null, accountId: from, toAccountId: to, date: iso(offset), payee: "", note });
 
@@ -496,12 +707,13 @@ const Store = {
     s.groups = [{ id: "g_goa", name: "Goa Trip", emoji: "🏖️", memberIds: ["f_rahul", "f_priya", "f_aakash"] }];
 
     const eq = (amt, ids) => ids.map(id => ({ id, amount: Math.round(amt / ids.length) }));
+    const all4 = ["me", "f_rahul", "f_priya", "f_aakash"];
     s.splitExpenses = [
-      { id: uid(), groupId: "g_goa", desc: "Flight tickets", amount: 18400, paidBy: "me", shares: eq(18400, ["me", "f_rahul", "f_priya", "f_aakash"]), date: iso(21) },
-      { id: uid(), groupId: "g_goa", desc: "Beach resort · 2 nights", amount: 12000, paidBy: "me", shares: eq(12000, ["me", "f_rahul", "f_priya", "f_aakash"]), date: iso(19) },
-      { id: uid(), groupId: "g_goa", desc: "Seafood dinner", amount: 3200, paidBy: "f_rahul", shares: eq(3200, ["me", "f_rahul", "f_priya", "f_aakash"]), date: iso(19) },
-      { id: uid(), groupId: "g_goa", desc: "Scooty rental", amount: 1600, paidBy: "f_priya", shares: eq(1600, ["me", "f_rahul", "f_priya", "f_aakash"]), date: iso(18) },
-      { id: uid(), groupId: null, desc: "Movie tickets", amount: 600, paidBy: "me", shares: eq(600, ["me", "f_aakash"]), date: iso(5) },
+      { id: uid(), groupId: "g_goa", desc: "Flight tickets", categoryId: "c_travel", amount: 18400, paidBy: "me", shares: eq(18400, all4), date: iso(21) },
+      { id: uid(), groupId: "g_goa", desc: "Beach resort · 2 nights", categoryId: "c_travel", amount: 12000, paidBy: "me", shares: eq(12000, all4), date: iso(19) },
+      { id: uid(), groupId: "g_goa", desc: "Seafood dinner", categoryId: "c_food", amount: 3200, paidBy: "f_rahul", shares: eq(3200, all4), date: iso(19) },
+      { id: uid(), groupId: "g_goa", desc: "Scooty rental", categoryId: "c_trans", amount: 1600, paidBy: "f_priya", shares: eq(1600, all4), date: iso(18) },
+      { id: uid(), groupId: null, desc: "Movie tickets", categoryId: "c_ent", amount: 600, paidBy: "me", shares: eq(600, ["me", "f_aakash"]), date: iso(5) },
     ];
     s.settlements = [
       { id: uid(), groupId: "g_goa", from: "f_aakash", to: "me", amount: 3000, date: iso(10) },
