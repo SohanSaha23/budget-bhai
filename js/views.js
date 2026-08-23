@@ -1083,6 +1083,6 @@ const Views = {
       ${item("🧪", "Reset demo data", "", "reset-demo")}
       ${item("🗑️", "Erase everything", "", "erase-all")}
     </div>
-    <p class="sub center" style="margin-top:18px">Budget Bhai · v1.8 · data stays on your device 🔒</p>`;
+    <p class="sub center" style="margin-top:18px">Budget Bhai · v1.9 · data stays on your device 🔒</p>`;
   },
 };

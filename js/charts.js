@@ -143,13 +143,14 @@ const Charts = {
     const max = Math.max(...vals, 1);
     const today = D.todayISO();
 
+    // no filler divs: the 1st is simply placed in its own weekday column
     let cells = "";
-    for (let i = 0; i < first; i++) cells += `<div class="hc empty"></div>`;
     for (let d = 1; d <= dim; d++) {
       const iso = prefix + "-" + String(d).padStart(2, "0");
       const v = dayMap[iso] || 0;
       const lvl = v === 0 ? 0 : Math.min(4, Math.ceil(v / max * 4));
-      cells += `<div class="hc lv${lvl} ${iso === today ? "today" : ""}" title="${D.short(iso)}: ${fmt(v)}"
+      const place = d === 1 && first > 0 ? ` style="grid-column-start:${first + 1}"` : "";
+      cells += `<div class="hc lv${lvl} ${iso === today ? "today" : ""}"${place} title="${D.short(iso)}: ${fmt(v)}"
         data-action="heat-day" data-date="${iso}"><span>${d}</span></div>`;
     }
     return `<div class="heat">

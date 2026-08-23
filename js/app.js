@@ -28,15 +28,24 @@ const Lock = {
     } catch (e) { return false; }
   },
 
-  /* show the lock screen at startup / on resume */
+  /* show the lock screen (cold start, or when the user locks manually) */
   async show() {
     if (this.locked) return;
     this.locked = true;
     this.mode = "unlock"; this.entered = ""; this.firstPin = "";
     this.el().classList.remove("hidden");
     this.render();
-    if (Store.state.settings.biometric && await this.bioAvailable()) {
-      if (await this.bioVerify()) this.hide();
+    if (Store.state.settings.biometric) this.promptBio();
+  },
+
+  /* one biometric prompt at a time — re-entrancy is what caused the unlock loop */
+  async promptBio() {
+    if (this.busy || !this.locked) return;
+    this.busy = true;
+    try {
+      if (await this.bioAvailable() && await this.bioVerify()) this.hide();
+    } finally {
+      this.busy = false;
     }
   },
 
@@ -64,27 +73,44 @@ const Lock = {
   render() {
     const dots = Array.from({ length: PIN_LEN }, (_, i) =>
       `<i class="${i < this.entered.length ? "on" : ""}"></i>`).join("");
-    const keys = [1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => `<button data-k="${n}">${n}</button>`).join("");
+    const keys = [1, 2, 3, 4, 5, 6, 7, 8, 9].map(n =>
+      `<button data-k="${n}"><span>${n}</span></button>`).join("");
     const canCancel = this.mode !== "unlock";
     const showBio = this.mode === "unlock" && Store.state.settings.biometric;
+    const step = this.mode === "set" ? 1 : this.mode === "confirm" ? 2 : 0;
 
     this.el().innerHTML = `
+      <div class="lock-bg"></div>
       <div class="lock-inner">
-        <div class="lock-logo">🔒</div>
-        <div class="lock-title">${this.title()}</div>
-        <div class="lock-sub" id="lock-msg">${this.mode === "unlock" ? "Budget Bhai is locked" : "This keeps your data private"}</div>
-        <div class="pin-dots" id="pin-dots">${dots}</div>
+        <div class="lock-head">
+          <div class="lock-badge"><img src="icons/icon-192.png" alt=""><span class="lock-dot"></span></div>
+          <div class="lock-brand">Budget&nbsp;Bhai</div>
+          <div class="lock-title">${this.title()}</div>
+          <div class="lock-sub" id="lock-msg">${
+            this.mode === "unlock" ? "Your data stays on this device"
+            : this.mode === "set" ? "Pick something you'll remember"
+            : "Type it once more to confirm"}</div>
+          ${step ? `<div class="lock-steps">${[1, 2].map(i =>
+            `<i class="${i <= step ? "on" : ""}"></i>`).join("")}</div>` : ""}
+          <div class="pin-dots" id="pin-dots">${dots}</div>
+        </div>
+
         <div class="pin-pad">
           ${keys}
-          <button class="ghost" data-k="${showBio ? "bio" : canCancel ? "cancel" : ""}">${showBio ? "☝" : canCancel ? "Cancel" : ""}</button>
-          <button data-k="0">0</button>
-          <button class="ghost" data-k="back">⌫</button>
+          <button class="ghost" data-k="${showBio ? "bio" : canCancel ? "cancel" : ""}" ${!showBio && !canCancel ? "disabled" : ""}>
+            ${showBio ? `<svg viewBox="0 0 24 24" class="fp"><path d="M12 2a9 9 0 0 0-9 9v3M12 2a9 9 0 0 1 9 9v6M7 11a5 5 0 0 1 10 0v7M12 11v8M4 19c1.2-1.6 1.8-3.4 1.8-5.2"/></svg>`
+              : canCancel ? "Cancel" : ""}
+          </button>
+          <button data-k="0"><span>0</span></button>
+          <button class="ghost" data-k="back" aria-label="Delete">
+            <svg viewBox="0 0 24 24" class="bk"><path d="M9 5h11a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H9l-6-7 6-7Z"/><path d="M13 10l4 4m0-4-4 4"/></svg>
+          </button>
         </div>
       </div>`;
 
     this.el().onclick = (e) => {
       const b = e.target.closest("[data-k]");
-      if (b) this.key(b.dataset.k);
+      if (b && b.dataset.k) this.key(b.dataset.k);
     };
   },
 
@@ -92,10 +118,7 @@ const Lock = {
     if (!k) return;
     if (k === "back") { this.entered = this.entered.slice(0, -1); return this.paint(); }
     if (k === "cancel") { this.hide(); if (this.onDone) { this.onDone(false); this.onDone = null; } return; }
-    if (k === "bio") {
-      if (await this.bioVerify()) this.hide();
-      return;
-    }
+    if (k === "bio") { this.promptBio(); return; }
     if (this.entered.length >= PIN_LEN) return;
     this.entered += k;
     this.paint();
@@ -159,24 +182,10 @@ const App = {
     if (posted) setTimeout(() => toast(posted + " recurring transaction" + (posted > 1 ? "s" : "") + " auto-posted", "⚡"), 600);
     this.render();
     const s = Store.state.settings;
+    // Locks on a cold start only. Merely switching apps does NOT re-lock:
+    // the biometric prompt itself backgrounds the app, so resume-locking put
+    // the unlock into an endless loop.
     if (s.lock && s.pinHash) Lock.show();
-    this.initLockOnResume();
-  },
-
-  /* re-lock after the app has been in the background for a while */
-  initLockOnResume() {
-    let awaySince = 0;
-    const GRACE = 60000;
-    const onHide = () => { awaySince = Date.now(); };
-    const onShow = () => {
-      const s = Store.state.settings;
-      if (s.lock && s.pinHash && awaySince && Date.now() - awaySince > GRACE) Lock.show();
-    };
-    const cap = window.Capacitor;
-    if (this.isNative() && cap.Plugins && cap.Plugins.App) {
-      cap.Plugins.App.addListener("appStateChange", ({ isActive }) => isActive ? onShow() : onHide());
-    }
-    document.addEventListener("visibilitychange", () => document.hidden ? onHide() : onShow());
   },
 
   /* ---------- back navigation ---------- */
