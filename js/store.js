@@ -84,7 +84,7 @@ const Store = {
       },
       accounts: [], categories: DEFAULT_CATEGORIES.map(c => ({ ...c })),
       transactions: [], budgets: [], friends: [], groups: [],
-      splitExpenses: [], settlements: [], goals: [], recurring: [],
+      splitExpenses: [], settlements: [], goals: [], recurring: [], loans: [],
     };
   },
 
@@ -473,6 +473,20 @@ const Store = {
     return out.sort((a, b) => a.date < b.date ? 1 : -1);
   },
 
+  /* how much `fromId` still owes `toId` in this context — drives the settle-up default */
+  owedBetween(fromId, toId, groupId) {
+    if (fromId === toId) return 0;
+    if (groupId) {
+      const e = this.groupEdges(groupId).find(x => x.from === fromId && x.to === toId);
+      return e ? Math.round(e.amount * 100) / 100 : 0;
+    }
+    // 1-to-1: settle against the whole balance you carry with that person
+    const other = fromId === "me" ? toId : fromId;
+    const bal = this.friendBalance(other);            // > 0 => they owe you
+    const amt = fromId === "me" ? -bal : bal;
+    return amt > 0 ? Math.round(amt * 100) / 100 : 0;
+  },
+
   splitTotals() {
     let owedToMe = 0, iOwe = 0;
     for (const f of this.state.friends) {
@@ -490,6 +504,50 @@ const Store = {
       if (e.from === "me") bal -= e.amount;
     }
     return bal;
+  },
+
+  /* ---------- lending & borrowing ---------- */
+  loanPerson(l) { return l.personId ? (this.friend(l.personId)?.name || l.personName || "?") : (l.personName || "?"); },
+
+  /* simple interest accrued from the loan date to today (0 when no rate set) */
+  loanInterest(l, asOf) {
+    if (!l.rate) return 0;
+    const days = Math.max(0, (D.parse(asOf || D.todayISO()) - D.parse(l.date)) / 86400000);
+    return Math.round(l.amount * (l.rate / 100) * (days / 365) * 100) / 100;
+  },
+
+  loanStatus(l) {
+    const repaid = (l.repayments || []).reduce((s, r) => s + r.amount, 0);
+    const interest = this.loanInterest(l);
+    const total = Math.round((l.amount + interest) * 100) / 100;
+    const remaining = Math.max(0, Math.round((total - repaid) * 100) / 100);
+    const closed = remaining < 0.01;
+    const today = D.todayISO();
+    return {
+      repaid, interest, total, remaining, closed,
+      overdue: !closed && !!l.dueDate && l.dueDate < today,
+      dueSoon: !closed && !!l.dueDate && l.dueDate >= today && l.dueDate <= D.addDays(today, 7),
+      pct: total > 0 ? Math.min(100, Math.round(repaid / total * 100)) : 0,
+    };
+  },
+
+  loanTotals() {
+    let lentOut = 0, borrowed = 0, overdue = 0;
+    for (const l of this.state.loans) {
+      const st = this.loanStatus(l);
+      if (st.closed) continue;
+      if (l.type === "lent") lentOut += st.remaining; else borrowed += st.remaining;
+      if (st.overdue) overdue++;
+    }
+    return { lentOut, borrowed, net: lentOut - borrowed, overdue };
+  },
+
+  addRepayment(loanId, amount, date, note) {
+    const l = this.state.loans.find(x => x.id === loanId);
+    if (!l) return;
+    l.repayments = l.repayments || [];
+    l.repayments.push({ id: uid(), amount, date, note: note || "" });
+    this.save();
   },
 
   /* ---------- recurring ---------- */
@@ -558,6 +616,18 @@ const Store = {
       const a = odd[0], c = this.cat(a.tx.categoryId);
       out.push({ ic: "⚠️", tone: "warn", t: "Unusual " + c.name + " spend",
         d: (a.tx.payee || c.name) + " cost " + fmt(a.tx.amount) + " — about " + a.times.toFixed(1) + "× your usual " + fmt(Math.round(a.mean)) + "." });
+    }
+
+    // loans past their due date — needs chasing, so it ranks high
+    const lt = this.loanTotals();
+    if (lt.overdue) {
+      const late = this.state.loans.map(l => ({ l, st: this.loanStatus(l) }))
+        .filter(x => x.st.overdue)
+        .sort((a, b) => a.l.dueDate < b.l.dueDate ? -1 : 1)[0];
+      out.push({ ic: "⏰", tone: "bad",
+        t: lt.overdue + " overdue loan" + (lt.overdue > 1 ? "s" : ""),
+        d: (late.l.type === "lent" ? this.loanPerson(late.l) + " still owes you " : "You still owe " + this.loanPerson(late.l) + " ")
+          + fmt(late.st.remaining) + " — was due " + D.short(late.l.dueDate) + "." });
     }
 
     // savings rate
@@ -723,6 +793,20 @@ const Store = {
       { id: uid(), name: "iPhone 17", emoji: "📱", color: "#7c6bff", target: 90000, saved: 32000 },
       { id: uid(), name: "Emergency Fund", emoji: "🛡️", color: "#2dd4bf", target: 150000, saved: 78000 },
       { id: uid(), name: "Ladakh Bike Trip", emoji: "🏍️", color: "#fbbf24", target: 45000, saved: 12500 },
+    ];
+
+    s.loans = [
+      { id: uid(), type: "lent", personId: "f_rahul", personName: "Rahul", amount: 15000,
+        date: iso(45), dueDate: iso(-15), rate: 0, note: "Emergency — hospital bill",
+        repayments: [{ id: uid(), amount: 5000, date: iso(20), note: "First instalment" }] },
+      { id: uid(), type: "lent", personId: null, personName: "Vikram (colleague)", amount: 3000,
+        date: iso(12), dueDate: iso(-40), rate: 0, note: "Lunch money, will return next salary", repayments: [] },
+      { id: uid(), type: "borrowed", personId: "f_priya", personName: "Priya", amount: 8000,
+        date: iso(60), dueDate: iso(5), rate: 0, note: "Borrowed for laptop repair",
+        repayments: [{ id: uid(), amount: 4000, date: iso(25), note: "" }] },
+      { id: uid(), type: "lent", personId: "f_aakash", personName: "Aakash", amount: 2000,
+        date: iso(90), dueDate: "", rate: 0, note: "Concert tickets",
+        repayments: [{ id: uid(), amount: 2000, date: iso(70), note: "Paid back in full" }] },
     ];
 
     const nextDom = (dom) => {

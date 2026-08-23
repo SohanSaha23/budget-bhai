@@ -10,6 +10,7 @@ const UI = {
   statsType: "expense",
   splitsTab: "friends",
   splitPeriod: "monthly",
+  loansTab: "lent",
   transFilter: { q: "", type: "all", cat: "all", acc: "all" },
   groupId: null, friendId: null, accountId: null,
 };
@@ -251,6 +252,16 @@ const Views = {
         </div>
       </div>
     </div>
+
+    ${(() => { const t = Store.loanTotals(); return (t.lentOut || t.borrowed) ? `
+    <div class="sec"><span class="h2">Lend & Borrow</span><button class="card-link" data-action="open-loans">Open</button></div>
+    <div class="card" data-action="open-loans">
+      <div class="card-row">
+        <div><div class="sub">Owed to you</div><div class="h2 pos money">${fmt(t.lentOut)}</div></div>
+        <div><div class="sub">You owe</div><div class="h2 neg money">${fmt(t.borrowed)}</div></div>
+        ${t.overdue ? `<span class="delta up">${t.overdue} overdue</span>` : `<span class="sub">on track</span>`}
+      </div>
+    </div>` : ""; })()}
 
     <div class="sec"><span class="h2">Last 14 days</span><button class="card-link" data-action="nav" data-view="stats">Stats</button></div>
     <div class="card" data-action="nav" data-view="stats">
@@ -890,6 +901,69 @@ const Views = {
     ${list.length ? groupTxByDate(list) : '<div class="empty"><div class="big">🗒️</div>No transactions in this account.</div>'}`;
   },
 
+  /* ================= LEND & BORROW ================= */
+  loans() {
+    const s = Store.state;
+    const t = Store.loanTotals();
+    const tab = UI.loansTab;
+    const all = s.loans.map(l => ({ l, st: Store.loanStatus(l) }));
+    const list = tab === "closed"
+      ? all.filter(x => x.st.closed)
+      : all.filter(x => !x.st.closed && x.l.type === tab);
+    // overdue first, then soonest due, then biggest
+    list.sort((a, b) =>
+      (b.st.overdue - a.st.overdue) ||
+      ((a.l.dueDate || "9999") < (b.l.dueDate || "9999") ? -1 : 1) ||
+      (b.st.remaining - a.st.remaining));
+
+    const card = ({ l, st }) => {
+      const name = Store.loanPerson(l);
+      const f = l.personId ? Store.friend(l.personId) : null;
+      const colour = f ? f.color : (l.type === "lent" ? "#34d399" : "#fb7185");
+      const badge = st.closed ? `<span class="delta flat">settled ✓</span>`
+        : st.overdue ? `<span class="delta up">overdue</span>`
+        : st.dueSoon ? `<span class="delta warn-chip">due soon</span>` : "";
+      return `<div class="card bud" data-action="loan-detail" data-id="${l.id}" style="margin-bottom:10px">
+        <div class="top">
+          <div class="pavatar" style="background:${colour};width:40px;height:40px;font-size:14px">${esc(initials(name))}</div>
+          <div style="flex:1;min-width:0">
+            <div class="nm">${esc(name)} ${badge}</div>
+            <div class="st">${l.type === "lent" ? "You lent" : "You borrowed"} ${fmt(l.amount)}${l.rate ? " · " + l.rate + "% p.a." : ""}${l.dueDate ? " · due " + D.short(l.dueDate) : ""}</div>
+          </div>
+          <div class="rem ${st.closed ? "muted" : l.type === "lent" ? "pos" : "neg"}">${st.closed ? "—" : fmt(st.remaining)}</div>
+        </div>
+        <div class="bar"><i style="width:${st.pct}%;background:${st.closed ? "var(--green)" : st.overdue ? "var(--red)" : colour}"></i></div>
+        <div class="sub mt8" style="font-size:11.5px">${fmt(st.repaid)} of ${fmt(st.total)} repaid${st.interest ? " · incl. " + fmt(st.interest) + " interest" : ""}</div>
+      </div>`;
+    };
+
+    return `
+    <div class="back-head">
+      <button class="icon-btn" data-action="back"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>
+      <span class="h1">Lend & Borrow</span>
+      <button class="icon-btn" data-action="add-loan"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+    </div>
+    <div class="split-hero">
+      <div class="cell"><div class="lab">Owed to you</div><div class="val pos money">${fmt(t.lentOut)}</div></div>
+      <div class="cell"><div class="lab">You owe</div><div class="val neg money">${fmt(t.borrowed)}</div></div>
+    </div>
+    ${t.overdue ? `<div class="card flat" style="border-color:rgba(251,113,133,.45);margin-bottom:14px">
+      <b>⏰ ${t.overdue} loan${t.overdue > 1 ? "s are" : " is"} past the due date</b>
+    </div>` : ""}
+    <div class="tabbar">
+      ${[["lent", "Lent out"], ["borrowed", "Borrowed"], ["closed", "Settled"]].map(([k, lb]) =>
+        `<button class="${tab === k ? "on" : ""}" data-action="loans-tab" data-t="${k}">${lb}</button>`).join("")}
+    </div>
+    <div class="stagger">
+      ${list.length ? list.map(card).join("")
+        : `<div class="empty"><div class="big">${tab === "closed" ? "✅" : "🤝"}</div>${
+            tab === "lent" ? "Nothing lent out right now."
+            : tab === "borrowed" ? "You haven't borrowed anything."
+            : "No settled loans yet."}</div>
+           ${tab !== "closed" ? `<button class="btn primary" data-action="add-loan">＋ Record a loan</button>` : ""}`}
+    </div>`;
+  },
+
   /* ================= GOALS ================= */
   goals() {
     const s = Store.state;
@@ -989,6 +1063,8 @@ const Views = {
       ${item("🧑‍🤝‍🧑", "Splits", "friends & groups", "open-splits")}
       ${item("🏦", "Accounts", fmt(Store.netWorth()), "open-accounts")}
       ${item("🎯", "Budgets", "", "open-budgets")}
+      ${item("🤝", "Lend & Borrow", (() => { const t = Store.loanTotals();
+        return t.lentOut || t.borrowed ? fmt(t.lentOut) + " out · " + fmt(t.borrowed) + " owed" : "none active"; })(), "open-loans")}
       ${item("🐷", "Savings Goals", Store.state.goals.length + " active", "open-goals")}
       ${item("🔄", "Recurring", Store.state.recurring.length + " items", "open-recurring")}
       ${item("🏷️", "Categories", Store.state.categories.length + "", "open-categories")}
@@ -1007,6 +1083,6 @@ const Views = {
       ${item("🧪", "Reset demo data", "", "reset-demo")}
       ${item("🗑️", "Erase everything", "", "erase-all")}
     </div>
-    <p class="sub center" style="margin-top:18px">Budget Bhai · v1.7 · data stays on your device 🔒</p>`;
+    <p class="sub center" style="margin-top:18px">Budget Bhai · v1.8 · data stays on your device 🔒</p>`;
   },
 };

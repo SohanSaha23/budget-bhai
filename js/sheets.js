@@ -557,24 +557,65 @@ function settleSheet(ctx) {
   else if (existing) memberIds = ["me", existing.from === "me" ? existing.to : existing.from];
   else memberIds = ["me", friendId];
 
-  // for a new entry, prefill with the largest outstanding debt
-  const edges = existing ? [] : (groupId ? Store.groupEdges(groupId) : Store.personalEdges(friendId));
-  const sug = existing || edges[0];
-  const pick = (id, side) => sug && sug[side] === id ? "selected" : "";
+  /* default direction: whoever actually owes, pays */
+  let defFrom, defTo;
+  if (existing) {
+    defFrom = existing.from; defTo = existing.to;
+  } else if (groupId) {
+    const edges = Store.groupEdges(groupId);
+    const pick = edges.find(e => e.from === "me" || e.to === "me") || edges[0];
+    if (pick) { defFrom = pick.from; defTo = pick.to; }
+    else { defFrom = memberIds[1] || "me"; defTo = "me"; }
+  } else {
+    const bal = Store.friendBalance(friendId);        // > 0 => they owe you
+    if (bal >= 0) { defFrom = friendId; defTo = "me"; }
+    else { defFrom = "me"; defTo = friendId; }
+  }
+
+  const opts = (sel) => memberIds
+    .map(id => `<option value="${id}" ${id === sel ? "selected" : ""}>${esc(Store.friend(id)?.name || "?")}</option>`).join("");
+  const startAmt = existing ? Math.round(existing.amount * 100) / 100 : Store.owedBetween(defFrom, defTo, groupId);
 
   Sheet.open(`
     <div class="sheet-title">🤝 ${existing ? "Edit payment" : "Settle up"}</div>
     <div class="row2">
       <div class="field"><label>Who paid</label>
-        <select class="input" id="st-from">${memberIds.map(id => `<option value="${id}" ${pick(id, "from")}>${esc(Store.friend(id)?.name || "?")}</option>`).join("")}</select></div>
+        <select class="input" id="st-from">${opts(defFrom)}</select></div>
       <div class="field"><label>Received by</label>
-        <select class="input" id="st-to">${memberIds.map(id => `<option value="${id}" ${pick(id, "to")}>${esc(Store.friend(id)?.name || "?")}</option>`).join("")}</select></div>
+        <select class="input" id="st-to">${opts(defTo)}</select></div>
     </div>
-    <div class="field"><label>Amount (${currencyInfo().sym})</label>
-      <input class="input" type="number" id="st-amt" value="${sug ? Math.round(sug.amount * 100) / 100 : ""}"></div>
+    <div class="field">
+      <label>Amount (${currencyInfo().sym})</label>
+      <input class="input" type="number" id="st-amt" value="${startAmt || ""}">
+      <div class="card-row mt8">
+        <span class="sub" id="st-owed"></span>
+        <button class="btn ghost sm" id="st-full" type="button">Full amount</button>
+      </div>
+    </div>
     <div class="field"><label>Date</label><input class="input" type="date" id="st-date" value="${existing ? existing.date : D.todayISO()}"></div>
     <button class="btn primary" id="st-save">${existing ? "Save changes" : "Record payment"}</button>
     ${existing ? `<button class="btn danger mt8" id="st-del">Delete payment</button>` : ""}`);
+
+  /* keep the suggested amount in step with the chosen payer / receiver */
+  const fromEl = document.getElementById("st-from");
+  const toEl = document.getElementById("st-to");
+  const amtEl = document.getElementById("st-amt");
+  const owedEl = document.getElementById("st-owed");
+  let owed = startAmt;
+
+  const refresh = (retarget) => {
+    owed = Store.owedBetween(fromEl.value, toEl.value, groupId);
+    owedEl.innerHTML = fromEl.value === toEl.value
+      ? `<span class="warn">Pick two different people</span>`
+      : owed > 0
+        ? `${esc(Store.friend(fromEl.value)?.name || "?")} owes <b>${fmt(owed)}</b>`
+        : `Nothing outstanding this way`;
+    if (retarget) amtEl.value = owed || "";
+  };
+  fromEl.onchange = () => refresh(true);
+  toEl.onchange = () => refresh(true);
+  document.getElementById("st-full").onclick = () => { amtEl.value = owed || ""; };
+  refresh(false);
 
   document.getElementById("st-save").onclick = () => {
     const from = document.getElementById("st-from").value, to = document.getElementById("st-to").value;
@@ -597,6 +638,163 @@ function settleSheet(ctx) {
       Store.state.settlements = Store.state.settlements.filter(s => s.id !== existing.id);
       Store.save(); toast("Payment deleted", "🗑️"); App.render();
     });
+}
+
+/* =============== LEND & BORROW =============== */
+function loanSheet(editId) {
+  const l = editId ? Store.state.loans.find(x => x.id === editId) : null;
+  let type = l ? l.type : "lent";
+  let personId = l ? l.personId : null;
+
+  Sheet.open(`
+    <div class="sheet-title">${l ? "Edit loan" : "Record a loan"}</div>
+    <div class="seg">
+      <button class="${type === "lent" ? "on" : ""}" data-lt="lent">💸 I lent out</button>
+      <button class="${type === "borrowed" ? "on" : ""}" data-lt="borrowed">💰 I borrowed</button>
+    </div>
+    <div class="field"><label>Person</label>
+      ${Store.state.friends.length ? `<div class="chips" id="ln-friends">
+        ${Store.state.friends.map(f => `<button class="chip ${personId === f.id ? "on" : ""}" data-f="${f.id}">
+          <span class="em">👤</span>${esc(f.name)}</button>`).join("")}
+      </div>` : ""}
+      <input class="input mt8" id="ln-name" placeholder="Name (or pick a friend above)" value="${l ? esc(l.personName || Store.loanPerson(l)) : ""}">
+    </div>
+    <div class="row2">
+      <div class="field"><label>Amount (${currencyInfo().sym})</label>
+        <input class="input" type="number" id="ln-amt" value="${l ? l.amount : ""}" placeholder="0"></div>
+      <div class="field"><label>Date given</label>
+        <input class="input" type="date" id="ln-date" value="${l ? l.date : D.todayISO()}"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>Due date <span class="sub">(optional)</span></label>
+        <input class="input" type="date" id="ln-due" value="${l ? (l.dueDate || "") : ""}"></div>
+      <div class="field"><label>Interest % p.a. <span class="sub">(optional)</span></label>
+        <input class="input" type="number" id="ln-rate" value="${l && l.rate ? l.rate : ""}" placeholder="0"></div>
+    </div>
+    <div class="field"><label>Note</label>
+      <input class="input" id="ln-note" placeholder="what it was for" value="${l ? esc(l.note || "") : ""}"></div>
+    <button class="btn primary" id="ln-save">${l ? "Save changes" : "Record loan"}</button>
+    ${l ? `<button class="btn danger mt8" id="ln-del">Delete loan</button>` : ""}`);
+
+  document.querySelectorAll("#sheet [data-lt]").forEach(b => b.onclick = () => {
+    type = b.dataset.lt;
+    document.querySelectorAll("#sheet [data-lt]").forEach(x => x.classList.toggle("on", x.dataset.lt === type));
+  });
+  const fr = document.getElementById("ln-friends");
+  if (fr) fr.onclick = (e) => {
+    const b = e.target.closest("[data-f]");
+    if (!b) return;
+    personId = personId === b.dataset.f ? null : b.dataset.f;
+    fr.querySelectorAll(".chip").forEach(c => c.classList.toggle("on", c.dataset.f === personId));
+    if (personId) document.getElementById("ln-name").value = Store.friend(personId).name;
+  };
+
+  document.getElementById("ln-save").onclick = () => {
+    const name = document.getElementById("ln-name").value.trim();
+    const amount = parseFloat(document.getElementById("ln-amt").value);
+    if (!name) return toast("Who is this loan with?", "✏️");
+    if (!amount || amount <= 0) return toast("Enter the amount", "✏️");
+    const data = {
+      type, personId, personName: name, amount,
+      date: document.getElementById("ln-date").value || D.todayISO(),
+      dueDate: document.getElementById("ln-due").value || "",
+      rate: parseFloat(document.getElementById("ln-rate").value) || 0,
+      note: document.getElementById("ln-note").value.trim(),
+    };
+    if (l) Object.assign(l, data);
+    else Store.state.loans.push({ id: uid(), ...data, repayments: [] });
+    Store.save();
+    toast(l ? "Loan updated" : "Loan recorded", "🤝");
+    Sheet.close(); App.render();
+  };
+
+  if (l) document.getElementById("ln-del").onclick = () =>
+    confirmSheet("Delete this loan?", "Its repayment history goes too.", "Delete", () => {
+      Store.state.loans = Store.state.loans.filter(x => x.id !== l.id);
+      Store.save(); toast("Loan deleted", "🗑️"); App.render();
+    });
+}
+
+function loanDetailSheet(id) {
+  const l = Store.state.loans.find(x => x.id === id);
+  if (!l) return;
+  const st = Store.loanStatus(l);
+  const name = Store.loanPerson(l);
+  const lent = l.type === "lent";
+  const reps = [...(l.repayments || [])].sort((a, b) => a.date < b.date ? 1 : -1);
+
+  Sheet.open(`
+    <div class="sheet-title">${lent ? "💸" : "💰"} ${esc(name)}</div>
+    <div class="center">
+      <div class="sub">${st.closed ? "Fully settled 🎉" : lent ? "still owes you" : "you still owe"}</div>
+      <div class="h1 money ${st.closed ? "" : lent ? "pos" : "neg"}" style="margin:4px 0 12px">${fmt(st.remaining)}</div>
+      ${st.overdue ? `<div class="sub neg mb8"><b>⏰ Overdue since ${D.short(l.dueDate)}</b></div>` : ""}
+    </div>
+    <div class="bar big"><i style="width:${st.pct}%;background:${st.closed ? "var(--green)" : st.overdue ? "var(--red)" : "var(--primary)"}"></i></div>
+    <div class="sub center mt8" style="margin-bottom:14px">${st.pct}% repaid</div>
+
+    <div class="menu" style="margin-bottom:14px">
+      <div class="menu-item"><span class="grow">Principal</span><b class="money">${fmt(l.amount)}</b></div>
+      ${l.rate ? `<div class="menu-item"><span class="grow">Interest @ ${l.rate}% p.a.</span><b class="money">${fmt(st.interest)}</b></div>
+      <div class="menu-item"><span class="grow">Total owed</span><b class="money">${fmt(st.total)}</b></div>` : ""}
+      <div class="menu-item"><span class="grow">Repaid so far</span><b class="money pos">${fmt(st.repaid)}</b></div>
+      <div class="menu-item"><span class="grow">Remaining</span><b class="money ${st.closed ? "" : lent ? "pos" : "neg"}">${fmt(st.remaining)}</b></div>
+      <div class="menu-item"><span class="grow">Date given</span><span class="hint">${D.short(l.date)}</span></div>
+      ${l.dueDate ? `<div class="menu-item"><span class="grow">Due date</span><span class="hint ${st.overdue ? "neg" : ""}">${D.short(l.dueDate)}</span></div>` : ""}
+      ${l.note ? `<div class="menu-item"><span class="grow">Note</span><span class="hint">${esc(l.note)}</span></div>` : ""}
+    </div>
+
+    <div class="sec"><span class="h2">Repayments</span><span class="sub">${reps.length}</span></div>
+    <div class="card flat" style="padding:6px 10px;margin-bottom:14px">
+      ${reps.length ? reps.map(r => `
+        <div class="tx">
+          <div class="emo" style="background:${tint("#34d399", .16)}">✅</div>
+          <div class="mid"><div class="nm">${fmt(r.amount)}</div>
+          <div class="meta">${D.human(r.date)}${r.note ? " · " + esc(r.note) : ""}</div></div>
+          <button class="btn ghost sm" data-action="loan-unrepay" data-loan="${l.id}" data-rep="${r.id}">✕</button>
+        </div>`).join("") : '<div class="empty" style="padding:18px">No repayments yet.</div>'}
+    </div>
+
+    ${!st.closed ? `<button class="btn primary" id="ln-repay">＋ Record a repayment</button>` : ""}
+    <div class="row2 mt8">
+      <button class="btn ghost" id="ln-edit">✏️ Edit</button>
+      <button class="btn ghost" data-action="close-sheet">Close</button>
+    </div>`);
+
+  const rp = document.getElementById("ln-repay");
+  if (rp) rp.onclick = () => repaymentSheet(l.id);
+  document.getElementById("ln-edit").onclick = () => loanSheet(l.id);
+}
+
+function repaymentSheet(loanId) {
+  const l = Store.state.loans.find(x => x.id === loanId);
+  if (!l) return;
+  const st = Store.loanStatus(l);
+  const lent = l.type === "lent";
+  Sheet.open(`
+    <div class="sheet-title">Record a repayment</div>
+    <p class="sub center" style="margin-bottom:14px">${lent ? esc(Store.loanPerson(l)) + " pays you back" : "You pay back " + esc(Store.loanPerson(l))} — ${fmt(st.remaining)} outstanding</p>
+    <div class="field"><label>Amount (${currencyInfo().sym})</label>
+      <input class="input" type="number" id="rp-amt" value="${st.remaining}">
+      <div class="card-row mt8">
+        <span class="sub">Outstanding <b>${fmt(st.remaining)}</b></span>
+        <button class="btn ghost sm" id="rp-full" type="button">Full amount</button>
+      </div>
+    </div>
+    <div class="field"><label>Date</label><input class="input" type="date" id="rp-date" value="${D.todayISO()}"></div>
+    <div class="field"><label>Note</label><input class="input" id="rp-note" placeholder="optional"></div>
+    <button class="btn primary" id="rp-save">Save repayment</button>`);
+
+  document.getElementById("rp-full").onclick = () => { document.getElementById("rp-amt").value = st.remaining; };
+  document.getElementById("rp-save").onclick = () => {
+    const amt = parseFloat(document.getElementById("rp-amt").value);
+    if (!amt || amt <= 0) return toast("Enter an amount", "✏️");
+    Store.addRepayment(loanId, amt, document.getElementById("rp-date").value || D.todayISO(),
+      document.getElementById("rp-note").value.trim());
+    const after = Store.loanStatus(Store.state.loans.find(x => x.id === loanId));
+    toast(after.closed ? "Loan fully settled 🎉" : "Repayment recorded", after.closed ? "🎉" : "✅");
+    Sheet.close(); App.render();
+  };
 }
 
 /* =============== GOALS =============== */

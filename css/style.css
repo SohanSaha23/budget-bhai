@@ -428,6 +428,7 @@ html[data-theme="light"] .card{box-shadow:0 1px 3px rgba(30,41,88,.07)}
 .delta.up{background:rgba(251,113,133,.16);color:var(--red)}
 .delta.down{background:rgba(52,211,153,.16);color:var(--green)}
 .delta.flat,.delta.new{background:var(--chip);color:var(--muted)}
+.delta.warn-chip{background:rgba(251,191,36,.18);color:var(--amber)}
 
 /* ============ Calendar heatmap ============ */
 .heat-head,.heat-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px}

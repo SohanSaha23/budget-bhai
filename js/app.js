@@ -301,6 +301,7 @@ const App = {
     if (v === "splits" || v === "groupDetail") splitSheet(UI.groupId ? { group: UI.groupId } : null);
     else if (v === "friendDetail") splitSheet({ friend: UI.friendId });
     else if (v === "accounts" || v === "accountDetail") accountSheet();
+    else if (v === "loans") loanSheet();
     else if (v === "goals") goalSheet();
     else if (v === "recurring") recurringSheet();
     else if (v === "categories") categorySheet();
@@ -365,6 +366,19 @@ const Actions = {
   "open-budgets": () => App.push({ view: "budgets" }),
   "open-goals": () => App.push({ view: "goals" }),
   "open-recurring": () => App.push({ view: "recurring" }),
+  "open-loans": () => App.push({ view: "loans" }),
+  "loans-tab": d => { UI.loansTab = d.t; App.render(); },
+  "add-loan": () => loanSheet(),
+  "loan-detail": d => loanDetailSheet(d.id),
+  "loan-unrepay": d => {
+    const l = Store.state.loans.find(x => x.id === d.loan);
+    if (!l) return;
+    confirmSheet("Remove this repayment?", "The outstanding amount goes back up.", "Remove", () => {
+      l.repayments = l.repayments.filter(r => r.id !== d.rep);
+      Store.save(); toast("Repayment removed", "🗑️");
+      App.render(); loanDetailSheet(l.id);
+    });
+  },
   "open-categories": () => App.push({ view: "categories" }),
 
   "month-prev": () => { const d = new Date(UI.month.y, UI.month.m - 1, 1); UI.month = { y: d.getFullYear(), m: d.getMonth() }; App.render(); },
