@@ -4,6 +4,87 @@
 /* Holds the note editor's pending-save hook so navigation can flush it. */
 const NoteEditor = { flush: null };
 
+/* ---------------- reminders (Android local notifications) ----------------
+   Web browsers can't schedule notifications for a future date without a
+   server, so this is a no-op outside the native shell. */
+const Notify = {
+  plugin() {
+    const c = window.Capacitor;
+    return (App.isNative() && c.Plugins && c.Plugins.LocalNotifications) ? c.Plugins.LocalNotifications : null;
+  },
+  available() { return !!this.plugin(); },
+
+  async ensurePermission() {
+    const p = this.plugin();
+    if (!p) return false;
+    try {
+      let st = await p.checkPermissions();
+      if (st.display !== "granted") st = await p.requestPermissions();
+      return st.display === "granted";
+    } catch (e) { return false; }
+  },
+
+  /* wipes everything we scheduled and lays it out again from current data */
+  async reschedule() {
+    const p = this.plugin();
+    if (!p) return 0;
+    try {
+      const pending = await p.getPending();
+      if (pending.notifications.length) {
+        await p.cancel({ notifications: pending.notifications.map(n => ({ id: n.id })) });
+      }
+      const r = Store.state.settings.reminders || {};
+      if (!r.enabled) return 0;
+
+      const list = [];
+      let id = 1;
+      const at9 = (iso) => { const d = D.parse(iso); d.setHours(9, 0, 0, 0); return d; };
+      const future = (d) => d.getTime() > Date.now() + 30000;
+
+      if (r.daily) {
+        const [hh, mm] = (r.dailyTime || "21:00").split(":").map(Number);
+        list.push({
+          id: id++, title: "Log today's spending",
+          body: "Anything to add to Budget Bhai before bed?",
+          schedule: { on: { hour: hh, minute: mm }, allowWhileIdle: true },
+        });
+      }
+
+      if (r.bills) {
+        for (const rec of Store.upcomingRecurring(30)) {
+          const when = at9(rec.nextDue);
+          if (!future(when)) continue;
+          list.push({
+            id: id++, title: rec.name + (rec.type === "income" ? " expected" : " is due"),
+            body: fmt(rec.amount) + " · " + (FREQ_LABEL[rec.freq] || ""),
+            schedule: { at: when, allowWhileIdle: true },
+          });
+        }
+      }
+
+      if (r.loans) {
+        const today = D.todayISO();
+        for (const l of Store.state.loans) {
+          const st = Store.loanStatus(l);
+          if (st.closed || !l.dueDate) continue;
+          const when = st.overdue ? at9(D.addDays(today, 1)) : at9(l.dueDate);
+          if (!future(when)) continue;
+          const who = Store.loanPerson(l);
+          list.push({
+            id: id++,
+            title: st.overdue ? "Overdue: " + who : (l.type === "lent" ? who + " owes you" : "You owe " + who),
+            body: fmt(st.remaining) + (st.overdue ? " — was due " + D.short(l.dueDate) : " due today"),
+            schedule: { at: when, allowWhileIdle: true },
+          });
+        }
+      }
+
+      if (list.length) await p.schedule({ notifications: list });
+      return list.length;
+    } catch (e) { return 0; }
+  },
+};
+
 /* ---------------- app lock (4-digit PIN + optional fingerprint) ---------------- */
 const PIN_LEN = 4;
 
@@ -184,6 +265,7 @@ const App = {
     const posted = Store.processRecurring();
     if (posted) setTimeout(() => toast(posted + " recurring transaction" + (posted > 1 ? "s" : "") + " auto-posted", "⚡"), 600);
     this.render();
+    Notify.reschedule();
     const s = Store.state.settings;
     // Locks on a cold start only. Merely switching apps does NOT re-lock:
     // the biometric prompt itself backgrounds the app, so resume-locking put
@@ -368,6 +450,37 @@ const App = {
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   },
+
+  /* same idea for binary payloads (PDFs) — takes base64 */
+  async downloadBinary(filename, base64, mime) {
+    const cap = window.Capacitor;
+    if (this.isNative()) {
+      try {
+        const { Filesystem, Share } = cap.Plugins;
+        await Filesystem.writeFile({ path: filename, data: base64, directory: "CACHE" });
+        const { uri } = await Filesystem.getUri({ path: filename, directory: "CACHE" });
+        await Share.share({ title: filename, files: [uri] });
+      } catch (e) { /* sheet dismissed */ }
+      return;
+    }
+    const bin = atob(base64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const blob = new Blob([bytes], { type: mime || "application/octet-stream" });
+
+    const standalone = window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone;
+    if (standalone && navigator.canShare) {
+      try {
+        const file = new File([blob], filename, { type: mime });
+        if (navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: filename }); return; }
+      } catch (e) { if (e && e.name === "AbortError") return; }
+    }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  },
 };
 
 /* =============== global action dispatcher =============== */
@@ -400,11 +513,11 @@ const Actions = {
     toast(n.pinned ? "Unpinned" : "Pinned to top", n.pinned ? "" : "📌");
     App.render();
   },
-  "note-delete": d => confirmSheet("Delete this note?", "It can't be recovered.", "Delete", () => {
-    Store.deleteNote(d.id);
+  "note-delete": d => confirmSheet("Delete this note?", "You'll have 10 seconds to undo.", "Delete", () => {
     NoteEditor.flush = null;
-    toast("Note deleted", "🗑️");
+    const snap = Store.removeFrom("notes", d.id);
     if (UI.view === "noteEdit") App.back(); else App.render();
+    undoToast("Note deleted", snap);
   }),
   "loans-tab": d => { UI.loansTab = d.t; App.render(); },
   "add-loan": () => loanSheet(),
@@ -425,17 +538,29 @@ const Actions = {
 
   "stats-type": d => { UI.statsType = d.type; App.render(); },
   "stats-period": d => { UI.stats.period = d.p; UI.stats.anchor = D.todayISO(); App.render(); },
+  "stats-preset": d => {
+    const n = Number(d.n);
+    UI.stats.custom = n > 0
+      ? { from: D.addDays(D.todayISO(), -(n - 1)), to: D.todayISO() }
+      : { from: D.todayISO().slice(0, 4) + "-01-01", to: D.todayISO() };
+    App.render();
+  },
   "stats-prev": () => { App.statsMove(-1); },
   "stats-next": () => { App.statsMove(1); },
   "stats-cat": d => Views.statsCat(d.cat),
   "splits-tab": d => { UI.splitsTab = d.tab; App.render(); },
   "split-period": d => { UI.splitPeriod = d.p; App.render(); },
+  "friend-tab": d => { UI.friendTab = d.t; App.render(); },
   "settle-edit": d => settleSheet({ edit: d.id }),
   "tx-filter-type": d => { UI.transFilter.type = d.type; App.render(); },
+  "tx-scope": d => {
+    UI.transFilter.scope = d.s;
+    document.getElementById("txlist").innerHTML = Views.txList();
+  },
 
   "tx-detail": d => txDetailSheet(d.id),
   "split-detail": d => splitDetailSheet(d.id),
-  "friend-detail": d => App.push({ view: "friendDetail", friendId: d.id }),
+  "friend-detail": d => { UI.friendTab = "activity"; App.push({ view: "friendDetail", friendId: d.id }); },
   "group-detail": d => App.push({ view: "groupDetail", groupId: d.id }),
   "account-detail": d => App.push({ view: "accountDetail", accountId: d.id }),
   "goal-detail": d => goalDetailSheet(d.id),
@@ -457,6 +582,8 @@ const Actions = {
   "edit-profile": () => profileSheet(),
   "pick-currency": () => currencySheet(),
   "open-security": () => securitySheet(),
+  "open-reminders": () => remindersSheet(),
+  "open-statement": () => statementSheet(),
   "heat-day": d => {
     const list = Store.state.transactions.filter(t => t.date === d.date);
     const spent = list.filter(t => t.type === "expense").reduce((s, t) => s + t.amount, 0);

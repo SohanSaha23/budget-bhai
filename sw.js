@@ -1,12 +1,13 @@
 /* Budget Bhai — offline service worker.
    Bump CACHE on every deploy so phones pick up the new files. */
-const CACHE = "budget-bhai-v2.0.0";
+const CACHE = "budget-bhai-v2.1.0";
 
 const SHELL = [
   "./", "./index.html",
   "./css/style.css",
   "./js/store.js", "./js/ui.js", "./js/charts.js",
-  "./js/views.js", "./js/sheets.js", "./js/app.js",
+  "./js/views.js", "./js/sheets.js", "./js/report.js", "./js/app.js",
+  "./js/vendor/jspdf.umd.min.js",
   "./manifest.webmanifest",
   "./icons/icon-192.png", "./icons/icon-512.png",
   "./icons/apple-touch-icon-180.png",

@@ -6,13 +6,15 @@ const UI = {
   view: "home",
   stack: [],
   month: { y: now0.getFullYear(), m: now0.getMonth() },
-  stats: { period: "monthly", anchor: D.todayISO() },
+  stats: { period: "monthly", anchor: D.todayISO(),
+    custom: { from: D.addDays(D.todayISO(), -29), to: D.todayISO() } },
   statsType: "expense",
   splitsTab: "friends",
   splitPeriod: "monthly",
   loansTab: "lent",
   noteId: null, notesQuery: "", notesTag: "all",
-  transFilter: { q: "", type: "all", cat: "all", acc: "all" },
+  friendTab: "activity",
+  transFilter: { q: "", type: "all", cat: "all", acc: "all", scope: "all" },
   groupId: null, friendId: null, accountId: null,
 };
 
@@ -73,6 +75,47 @@ function periodSections(items, period) {
 
 /* split expenses created before categories existed fall back to "Other" */
 function splitCat(e) { return Store.cat(e.categoryId || "c_other"); }
+
+/* "where does my money with this person go" — donut + ranked categories.
+   Pass no friendId for every split you're part of. */
+function splitCategoryPanel(friendId, who) {
+  const rows = Store.splitCategoryBreakdown(friendId);
+  if (!rows.length) return `<div class="empty"><div class="big">🍰</div>No shared expenses to break down yet.</div>`;
+  const mineTotal = rows.reduce((s, r) => s + r.mine, 0);
+  const sharedTotal = rows.reduce((s, r) => s + r.total, 0);
+  const donut = rows.slice(0, 6).map(r => ({ label: r.cat.name, value: r.mine, color: r.cat.color }));
+  const rest = rows.slice(6).reduce((s, r) => s + r.mine, 0);
+  if (rest > 0) donut.push({ label: "Others", value: rest, color: "#64748b" });
+  const top = rows[0];
+
+  return `
+    <div class="card">
+      <div class="donut-wrap">
+        ${Charts.donut(donut, 150, "Your share", fmt(mineTotal))}
+        <div class="legend">
+          ${donut.map(d => `<div class="li"><span class="dot" style="background:${d.color}"></span>
+            <span class="nm">${esc(d.label)}</span><span class="pc">${mineTotal ? Math.round(d.value / mineTotal * 100) : 0}%</span></div>`).join("")}
+        </div>
+      </div>
+      <div class="divider"></div>
+      <div class="sub center">Biggest with ${esc(who)}: <b>${top.cat.emoji} ${esc(top.cat.name)}</b> —
+        ${fmt(top.mine)} of your ${fmt(mineTotal)}<br>
+        <span style="font-size:11px">${fmt(sharedTotal)} total billed across ${rows.reduce((s, r) => s + r.count, 0)} shared expenses</span></div>
+    </div>
+    <div class="card flat stagger" style="padding:10px 12px">
+      ${rows.map(r => {
+        const pc = mineTotal ? Math.round(r.mine / mineTotal * 100) : 0;
+        return `<div class="rank">
+          <div class="emo" style="background:${tint(r.cat.color, .16)}">${r.cat.emoji}</div>
+          <div class="mid">
+            <div class="nm"><span>${esc(r.cat.name)} <span class="sub">${pc}%</span></span><b class="money">${fmt(r.mine)}</b></div>
+            <div class="bar"><i style="width:${pc}%;background:${r.cat.color}"></i></div>
+            <div class="sub" style="margin-top:4px;font-size:11px">${r.count} expense${r.count === 1 ? "" : "s"} · ${fmt(r.total)} total bill</div>
+          </div>
+        </div>`;
+      }).join("")}
+    </div>`;
+}
 
 /* one row on a friend's page — shows only the amount owed between you two */
 function friendActivityRow(it) {
@@ -339,22 +382,53 @@ const Views = {
     <div id="txlist">${Views.txList()}</div>`;
   },
 
+  /* searching looks across every month unless you narrow it back down */
   txList() {
     const { y, m } = UI.month;
     const f = UI.transFilter;
-    let list = Store.monthTx(y, m);
-    if (f.type !== "all") list = list.filter(t => t.type === f.type);
-    if (f.cat !== "all") list = list.filter(t => t.categoryId === f.cat);
-    if (f.acc !== "all") list = list.filter(t => t.accountId === f.acc || t.toAccountId === f.acc);
-    if (f.q.trim()) {
-      const q = f.q.trim().toLowerCase();
-      list = list.filter(t =>
-        (t.payee || "").toLowerCase().includes(q) ||
-        (t.note || "").toLowerCase().includes(q) ||
-        (t.categoryId && Store.cat(t.categoryId).name.toLowerCase().includes(q)));
+    const searching = !!f.q.trim();
+    const allTime = searching && f.scope === "all";
+
+    let list;
+    if (allTime) {
+      list = Store.searchTransactions(f.q, f);
+    } else {
+      list = Store.monthTx(y, m);
+      if (f.type !== "all") list = list.filter(t => t.type === f.type);
+      if (f.cat !== "all") list = list.filter(t => t.categoryId === f.cat);
+      if (f.acc !== "all") list = list.filter(t => t.accountId === f.acc || t.toAccountId === f.acc);
+      if (searching) {
+        const q = f.q.trim().toLowerCase();
+        list = list.filter(t =>
+          (t.payee || "").toLowerCase().includes(q) ||
+          (t.note || "").toLowerCase().includes(q) ||
+          (t.categoryId && Store.cat(t.categoryId).name.toLowerCase().includes(q)) ||
+          String(t.amount).includes(q));
+      }
     }
-    return list.length ? groupTxByDate(list)
-      : '<div class="empty"><div class="big">🔎</div>Nothing found for this month.</div>';
+
+    let banner = "";
+    if (searching) {
+      const spent = list.filter(t => t.type === "expense").reduce((s, t) => s + t.amount, 0);
+      const span = allTime && list.length
+        ? D.short(list[list.length - 1].date) + " – " + D.short(list[0].date)
+        : D.monthName(y, m, true);
+      banner = `<div class="search-banner">
+        <div>
+          <b>${list.length}</b> result${list.length === 1 ? "" : "s"}${spent ? ` · ${fmt(spent)} spent` : ""}
+          <div class="sub">${list.length ? esc(span) : "no matches"}</div>
+        </div>
+        <div class="seg" style="margin:0;width:auto">
+          <button class="${allTime ? "on" : ""}" data-action="tx-scope" data-s="all">All time</button>
+          <button class="${!allTime ? "on" : ""}" data-action="tx-scope" data-s="month">This month</button>
+        </div>
+      </div>`;
+    }
+
+    return banner + (list.length ? groupTxByDate(list)
+      : `<div class="empty"><div class="big">🔎</div>${searching
+          ? (allTime ? "Nothing matches anywhere." : "Nothing this month — try <b>All time</b>.")
+          : "No transactions this month."}</div>`);
   },
 
   transAfter() {
@@ -376,6 +450,11 @@ const Views = {
   /* the equivalent range one step earlier — used for period-over-period deltas */
   prevStatsRange() {
     const p = UI.stats.period, a = UI.stats.anchor;
+    if (p === "custom") {
+      const { from, to } = UI.stats.custom;
+      const days = Math.round((D.parse(to) - D.parse(from)) / 86400000) + 1;
+      return { from: D.addDays(from, -days), to: D.addDays(from, -1), label: "previous " + days + " days" };
+    }
     const back = p === "daily" ? D.addDays(a, -1)
       : p === "weekly" ? D.addDays(a, -7)
       : p === "yearly" ? D.addMonths(a, -12)
@@ -384,6 +463,10 @@ const Views = {
   },
 
   rangeFor(p, a) {
+    if (p === "custom") {
+      const { from, to } = UI.stats.custom;
+      return { from, to, label: D.short(from) + " – " + D.short(to) };
+    }
     if (p === "daily") return { from: a, to: a, label: D.human(a) };
     if (p === "weekly") {
       const d = D.parse(a), off = (d.getDay() + 6) % 7; // Monday start
@@ -408,6 +491,36 @@ const Views = {
     const bars = [], cell = (from, to, label) => ({
       label, inc: Store.rangeTotal(from, to, "income"), exp: Store.rangeTotal(from, to, "expense"),
     });
+    if (p === "custom") {
+      // bucket the chosen span into readable chunks: days, weeks, then months
+      const { from, to } = UI.stats.custom;
+      const days = Math.round((D.parse(to) - D.parse(from)) / 86400000) + 1;
+      if (days <= 14) {
+        for (let i = 0; i < days; i++) {
+          const d = D.addDays(from, i);
+          bars.push(cell(d, d, D.parse(d).getDate() + ""));
+        }
+        return { bars, title: "Day by day" };
+      }
+      if (days <= 120) {
+        let s = D.weekStart(from);
+        while (s <= to) {
+          const e = D.addDays(s, 6);
+          bars.push(cell(s < from ? from : s, e > to ? to : e, D.short(s).split(" ")[0]));
+          s = D.addDays(s, 7);
+        }
+        return { bars, title: "Week by week" };
+      }
+      let cur = from.slice(0, 7);
+      while (cur <= to.slice(0, 7)) {
+        const [yy, mm] = cur.split("-").map(Number);
+        const mFrom = cur + "-01", mTo = cur + "-" + String(D.daysInMonth(yy, mm - 1)).padStart(2, "0");
+        bars.push(cell(mFrom < from ? from : mFrom, mTo > to ? to : mTo,
+          new Date(yy, mm - 1, 1).toLocaleDateString("en-IN", { month: "short" })));
+        cur = D.addMonths(cur + "-01", 1).slice(0, 7);
+      }
+      return { bars, title: "Month by month" };
+    }
     if (p === "daily") {
       for (let i = 6; i >= 0; i--) {
         const day = D.addDays(a, -i);
@@ -457,10 +570,11 @@ const Views = {
     const merchants = type === "expense" ? Store.merchantStats(from, to) : [];
     const topMerchant = merchants.length ? merchants[0].total : 0;
 
-    // heatmap always shows the month the anchor sits in
-    const [hy, hm] = [Number(UI.stats.anchor.slice(0, 4)), Number(UI.stats.anchor.slice(5, 7)) - 1];
-    const hFrom = UI.stats.anchor.slice(0, 7) + "-01";
-    const hTo = UI.stats.anchor.slice(0, 7) + "-" + String(D.daysInMonth(hy, hm)).padStart(2, "0");
+    // heatmap shows the month the anchor sits in (the end month for a custom range)
+    const hAnchor = UI.stats.period === "custom" ? to : UI.stats.anchor;
+    const [hy, hm] = [Number(hAnchor.slice(0, 4)), Number(hAnchor.slice(5, 7)) - 1];
+    const hFrom = hAnchor.slice(0, 7) + "-01";
+    const hTo = hAnchor.slice(0, 7) + "-" + String(D.daysInMonth(hy, hm)).padStart(2, "0");
 
     const weekday = Store.weekdayStats(from, to);
     const busiest = weekday.reduce((a, b) => b.total > a.total ? b : a, weekday[0]);
@@ -479,14 +593,28 @@ const Views = {
     return `
     <div class="page-head"><div class="title"><span class="h1">Statistics</span><span class="sub">Where your money goes</span></div></div>
     <div class="seg">
-      ${["daily", "weekly", "monthly", "yearly"].map(pp =>
-        `<button class="${UI.stats.period === pp ? "on" : ""}" data-action="stats-period" data-p="${pp}">${pp[0].toUpperCase() + pp.slice(1)}</button>`).join("")}
+      ${["daily", "weekly", "monthly", "yearly", "custom"].map(pp =>
+        `<button class="${UI.stats.period === pp ? "on" : ""}" data-action="stats-period" data-p="${pp}" style="font-size:12.5px">${pp === "custom" ? "Range" : pp[0].toUpperCase() + pp.slice(1)}</button>`).join("")}
     </div>
-    <div class="month-sel">
+    ${UI.stats.period === "custom" ? `
+    <div class="card flat" style="padding:12px 14px">
+      <div class="row2">
+        <div class="field" style="margin:0"><label>From</label>
+          <input class="input" type="date" id="cr-from" value="${UI.stats.custom.from}" max="${UI.stats.custom.to}"></div>
+        <div class="field" style="margin:0"><label>To</label>
+          <input class="input" type="date" id="cr-to" value="${UI.stats.custom.to}" min="${UI.stats.custom.from}"></div>
+      </div>
+      <div class="chips" style="margin-top:10px">
+        ${[["Last 7 days", 7], ["Last 30 days", 30], ["Last 90 days", 90], ["This year", 0]].map(([lb, n]) =>
+          `<button class="chip" data-action="stats-preset" data-n="${n}">${lb}</button>`).join("")}
+      </div>
+      <div class="sub center mt8">${esc(label)} · ${Math.round((D.parse(to) - D.parse(from)) / 86400000) + 1} days</div>
+    </div>`
+    : `<div class="month-sel">
       <button data-action="stats-prev">‹</button>
       <div class="m">${esc(label)}</div>
       <button data-action="stats-next">›</button>
-    </div>
+    </div>`}
     <div class="seg">
       <button class="${type === "expense" ? "on exp" : ""}" data-action="stats-type" data-type="expense">Expenses</button>
       <button class="${type === "income" ? "on inc" : ""}" data-action="stats-type" data-type="income">Income</button>
@@ -622,6 +750,20 @@ const Views = {
     </div>` : ""}`;
   },
 
+  statsAfter() {
+    const f = document.getElementById("cr-from"), t = document.getElementById("cr-to");
+    if (!f || !t) return;
+    const apply = () => {
+      let from = f.value, to = t.value;
+      if (!from || !to) return;
+      if (from > to) [from, to] = [to, from];       // tolerate a backwards range
+      UI.stats.custom = { from, to };
+      App.render();
+    };
+    f.onchange = apply;
+    t.onchange = apply;
+  },
+
   /* drill-down: one category's transactions in the active period */
   statsCat(catId) {
     const { from, to, label } = Views.statsRange();
@@ -737,6 +879,8 @@ const Views = {
       <button class="btn ghost mt8" data-action="add-group">＋ New group</button>`
         : `<div class="empty"><div class="big">🏝️</div>Create a group for trips, flatmates, events…</div>
            <button class="btn primary" data-action="add-group">＋ New group</button>`;
+    } else if (tab === "categories") {
+      body = splitCategoryPanel(null, "everyone");
     } else {
       const acts = [...s.splitExpenses.map(e => ({ ...e, kind: "expense" })),
         ...s.settlements.map(e => ({ ...e, kind: "settle" }))].sort((a, b) => a.date < b.date ? 1 : -1);
@@ -768,7 +912,8 @@ const Views = {
       <div class="cell"><div class="lab">You owe</div><div class="val neg money">${fmt(totals.iOwe)}</div></div>
     </div>
     <div class="tabbar">
-      ${["friends", "groups", "activity"].map(t => `<button class="${tab === t ? "on" : ""}" data-action="splits-tab" data-tab="${t}">${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}
+      ${[["friends", "Friends"], ["groups", "Groups"], ["activity", "Activity"], ["categories", "Categories"]]
+        .map(([k, lb]) => `<button class="${tab === k ? "on" : ""}" data-action="splits-tab" data-tab="${k}" style="font-size:12px">${lb}</button>`).join("")}
     </div>
     ${body}`;
   },
@@ -842,7 +987,12 @@ const Views = {
         <div class="mid"><div class="nm">${esc(g.name)}</div></div><span class="sub">›</span></div>`).join("")}
     </div>` : ""}
 
-    <div class="sec"><span class="h2">Activity</span></div>
+    <div class="tabbar">
+      ${[["activity", "Activity"], ["categories", "Categories"]].map(([k, lb]) =>
+        `<button class="${UI.friendTab === k ? "on" : ""}" data-action="friend-tab" data-t="${k}">${lb}</button>`).join("")}
+    </div>
+
+    ${UI.friendTab === "categories" ? splitCategoryPanel(f.id, f.name) : `
     ${periodTabs(UI.splitPeriod)}
     <div class="card flat" style="padding:6px 10px">
       ${activity.length
@@ -850,7 +1000,7 @@ const Views = {
             sectionBlock(sec, friendActivityRow, items =>
               fmt(items.reduce((s, it) => s + it.delta, 0), true))).join("")
         : '<div class="empty">No 1-to-1 activity yet.</div>'}
-    </div>`;
+    </div>`}`;
   },
 
   /* ================= ACCOUNTS ================= */
@@ -1208,17 +1358,19 @@ const Views = {
 
     <div class="menu">
       ${item("🔒", "App lock", s.lock ? (s.biometric ? "PIN + fingerprint" : "PIN on") : "off", "open-security")}
+      ${item("🔔", "Reminders", s.reminders && s.reminders.enabled ? "on" : "off", "open-reminders")}
       ${item("🎨", "Theme", s.theme === "dark" ? "Dark" : "Light", "toggle-theme")}
       ${item("💱", "Currency", cur.code + " " + cur.sym, "pick-currency")}
     </div>
 
     <div class="menu">
+      ${item("📄", "Monthly statement", "PDF", "open-statement")}
       ${item("📤", "Export CSV", "transactions", "export-csv")}
       ${item("💾", "Backup data", "JSON file", "backup-json")}
       ${item("📥", "Restore backup", "", "restore-json")}
       ${item("🧪", "Reset demo data", "", "reset-demo")}
       ${item("🗑️", "Erase everything", "", "erase-all")}
     </div>
-    <p class="sub center" style="margin-top:18px">Budget Bhai · v2.0 · data stays on your device 🔒</p>`;
+    <p class="sub center" style="margin-top:18px">Budget Bhai · v2.1 · data stays on your device 🔒</p>`;
   },
 };

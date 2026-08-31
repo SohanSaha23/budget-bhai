@@ -40,6 +40,39 @@ function toast(msg, emoji) {
   setTimeout(() => el.remove(), 2800);
 }
 
+/* ---------- undo toast (10 seconds to change your mind) ---------- */
+const UNDO_MS = 10000;
+
+function undoToast(msg, snapshot, afterRestore) {
+  const wrap = document.getElementById("toast-wrap");
+  const el = document.createElement("div");
+  el.className = "toast undo";
+  el.innerHTML = `<span>🗑️</span><span class="ut-msg">${esc(msg)}</span>
+    <button class="ut-btn">Undo</button>
+    <span class="ut-ring"><i></i></span>`;
+  wrap.appendChild(el);
+
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    el.style.animation = "toastOut .25s ease forwards";
+    setTimeout(() => el.remove(), 260);
+  };
+  const timer = setTimeout(finish, UNDO_MS);
+
+  el.querySelector(".ut-btn").onclick = () => {
+    if (done) return;
+    if (Store.restoreSnapshot(snapshot)) {
+      toast("Restored", "↩️");
+      if (afterRestore) afterRestore();
+      else App.render();
+    }
+    finish();
+  };
+}
+
 /* ---------- bottom sheet ---------- */
 const Sheet = {
   onClose: null,

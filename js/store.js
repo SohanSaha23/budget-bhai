@@ -103,6 +103,7 @@ const Store = {
       settings: {
         name: "You", currency: "INR", theme: "dark", demo: false,
         lock: false, pinHash: "", pinSalt: "", biometric: false,
+        reminders: { enabled: false, daily: true, dailyTime: "21:00", bills: true, loans: true },
       },
       accounts: [], categories: DEFAULT_CATEGORIES.map(c => ({ ...c })),
       transactions: [], budgets: [], friends: [], groups: [],
@@ -123,6 +124,7 @@ const Store = {
   migrate() {
     const def = this.blank();
     this.state.settings = Object.assign({}, def.settings, this.state.settings);
+    this.state.settings.reminders = Object.assign({}, def.settings.reminders, this.state.settings.reminders);
     for (const key of Object.keys(def)) {
       if (key !== "settings" && !Array.isArray(this.state[key])) this.state[key] = def[key];
     }
@@ -526,6 +528,60 @@ const Store = {
       if (e.from === "me") bal -= e.amount;
     }
     return bal;
+  },
+
+  /* ---------- delete with undo ----------
+     Removes an item but keeps its position so it can be slotted back exactly. */
+  removeFrom(key, id) {
+    const arr = this.state[key];
+    if (!Array.isArray(arr)) return null;
+    const index = arr.findIndex(x => x.id === id);
+    if (index < 0) return null;
+    const [item] = arr.splice(index, 1);
+    this.save();
+    return { key, item, index };
+  },
+  restoreSnapshot(snap) {
+    if (!snap || !Array.isArray(this.state[snap.key])) return false;
+    this.state[snap.key].splice(Math.min(snap.index, this.state[snap.key].length), 0, snap.item);
+    this.save();
+    return true;
+  },
+
+  /* ---------- search across every month ---------- */
+  searchTransactions(query, filters) {
+    const q = (query || "").trim().toLowerCase();
+    const f = filters || {};
+    let list = this.state.transactions;
+    if (f.type && f.type !== "all") list = list.filter(t => t.type === f.type);
+    if (f.cat && f.cat !== "all") list = list.filter(t => t.categoryId === f.cat);
+    if (f.acc && f.acc !== "all") list = list.filter(t => t.accountId === f.acc || t.toAccountId === f.acc);
+    if (q) {
+      list = list.filter(t =>
+        (t.payee || "").toLowerCase().includes(q) ||
+        (t.note || "").toLowerCase().includes(q) ||
+        (t.categoryId && this.cat(t.categoryId).name.toLowerCase().includes(q)) ||
+        String(t.amount).includes(q));
+    }
+    return [...list].sort((a, b) => a.date < b.date ? 1 : -1);
+  },
+
+  /* ---------- split spending by category ----------
+     Counts every shared expense (1-to-1 and group) that you and `friendId`
+     were both part of. Pass no id for every split you're in. */
+  splitCategoryBreakdown(friendId) {
+    const map = {};
+    for (const e of this.state.splitExpenses) {
+      const mine = e.shares.find(s => s.id === "me");
+      if (!mine) continue;
+      if (friendId && !e.shares.some(s => s.id === friendId)) continue;
+      const c = this.cat(e.categoryId || "c_other");
+      if (!map[c.id]) map[c.id] = { cat: c, mine: 0, total: 0, count: 0 };
+      map[c.id].mine += mine.amount;
+      map[c.id].total += e.amount;
+      map[c.id].count++;
+    }
+    return Object.values(map).sort((a, b) => b.mine - a.mine);
   },
 
   /* ---------- notes ---------- */

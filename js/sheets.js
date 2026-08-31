@@ -153,7 +153,7 @@ const TxSheet = {
     document.getElementById("tx-save").onclick = () => this.save();
     const del = document.getElementById("tx-delete");
     if (del) del.onclick = () => confirmSheet("Delete transaction?", "This cannot be undone.", "Delete", () => {
-      Store.deleteTransaction(st.id); toast("Transaction deleted", "🗑️"); App.render();
+      undoToast("Transaction deleted", Store.removeFrom("transactions", st.id)); App.render();
     });
   },
 
@@ -269,7 +269,7 @@ function txDetailSheet(id) {
     toast("Duplicated for today", "📄"); Sheet.close(); App.render();
   };
   document.getElementById("txd-del").onclick = () => confirmSheet("Delete transaction?", "This cannot be undone.", "Delete", () => {
-    Store.deleteTransaction(t.id); toast("Deleted", "🗑️"); App.render();
+    undoToast("Transaction deleted", Store.removeFrom("transactions", t.id)); App.render();
   });
 }
 
@@ -540,8 +540,7 @@ function splitDetailSheet(id) {
     <button class="btn danger mt14" id="spd-del">Delete split</button>
     <button class="btn ghost mt8" data-action="close-sheet">Close</button>`);
   document.getElementById("spd-del").onclick = () => confirmSheet("Delete this split?", "Balances will be recalculated.", "Delete", () => {
-    Store.state.splitExpenses = Store.state.splitExpenses.filter(x => x.id !== id);
-    Store.save(); toast("Split deleted", "🗑️"); App.render();
+    undoToast("Split deleted", Store.removeFrom("splitExpenses", id)); App.render();
   });
 }
 
@@ -635,8 +634,7 @@ function settleSheet(ctx) {
 
   if (existing) document.getElementById("st-del").onclick = () =>
     confirmSheet("Delete this payment?", "Balances will be recalculated.", "Delete", () => {
-      Store.state.settlements = Store.state.settlements.filter(s => s.id !== existing.id);
-      Store.save(); toast("Payment deleted", "🗑️"); App.render();
+      undoToast("Payment deleted", Store.removeFrom("settlements", existing.id)); App.render();
     });
 }
 
@@ -710,8 +708,7 @@ function loanSheet(editId) {
 
   if (l) document.getElementById("ln-del").onclick = () =>
     confirmSheet("Delete this loan?", "Its repayment history goes too.", "Delete", () => {
-      Store.state.loans = Store.state.loans.filter(x => x.id !== l.id);
-      Store.save(); toast("Loan deleted", "🗑️"); App.render();
+      undoToast("Loan deleted", Store.removeFrom("loans", l.id)); App.render();
     });
 }
 
@@ -833,8 +830,7 @@ function goalSheet(editId) {
     Store.save(); toast("Goal saved", "🎯"); Sheet.close(); App.render();
   };
   if (g) document.getElementById("gl-del").onclick = () => confirmSheet("Delete goal?", g.name + " will be removed.", "Delete", () => {
-    Store.state.goals = Store.state.goals.filter(x => x.id !== g.id);
-    Store.save(); toast("Goal deleted", "🗑️"); App.render();
+    undoToast("Goal deleted", Store.removeFrom("goals", g.id)); App.render();
   });
 }
 
@@ -1031,6 +1027,112 @@ async function securitySheet() {
       if (await Lock.bioVerify()) { s.biometric = true; Store.save(); toast("Fingerprint unlock on", "☝️"); }
       else { bio.checked = false; toast("Couldn't verify fingerprint", "⚠️"); }
     } else { s.biometric = false; Store.save(); toast("Fingerprint unlock off"); }
+  };
+}
+
+async function remindersSheet() {
+  const r = Store.state.settings.reminders;
+  const native = Notify.available();
+  const toggle = (id, label, hint, on) => `
+    <div class="menu-item">
+      <span class="em">${hint}</span><span class="grow">${label}</span>
+      <input type="checkbox" id="${id}" ${on ? "checked" : ""} style="width:19px;height:19px;accent-color:var(--primary)">
+    </div>`;
+
+  Sheet.open(`
+    <div class="sheet-title">🔔 Reminders</div>
+    ${!native ? `<p class="sub center" style="margin-bottom:14px">
+      Scheduled reminders need the Android app — the iPhone web app can't wake itself up.
+      Your settings are saved either way.</p>` : `<p class="sub center" style="margin-bottom:14px">
+      Budget Bhai will nudge you even when it's closed.</p>`}
+    <div class="menu">
+      ${toggle("rm-on", "Turn reminders on", "🔔", r.enabled)}
+    </div>
+    <div id="rm-opts" style="${r.enabled ? "" : "opacity:.45;pointer-events:none"}">
+      <div class="menu">
+        ${toggle("rm-daily", "Daily logging nudge", "🌙", r.daily)}
+        <div class="menu-item"><span class="em">⏰</span><span class="grow">Time</span>
+          <input type="time" class="input" id="rm-time" value="${r.dailyTime}" style="width:auto;padding:7px 10px"></div>
+        ${toggle("rm-bills", "Bills & salary due", "📅", r.bills)}
+        ${toggle("rm-loans", "Loan due dates", "🤝", r.loans)}
+      </div>
+    </div>
+    <div class="sub center" id="rm-status" style="margin-top:6px"></div>
+    <button class="btn ghost mt8" data-action="close-sheet">Done</button>`);
+
+  const status = document.getElementById("rm-status");
+  const save = async (askPermission) => {
+    const s = Store.state.settings.reminders;
+    s.enabled = document.getElementById("rm-on").checked;
+    s.daily = document.getElementById("rm-daily").checked;
+    s.bills = document.getElementById("rm-bills").checked;
+    s.loans = document.getElementById("rm-loans").checked;
+    s.dailyTime = document.getElementById("rm-time").value || "21:00";
+    document.getElementById("rm-opts").style.cssText = s.enabled ? "" : "opacity:.45;pointer-events:none";
+
+    if (s.enabled && askPermission && native) {
+      const ok = await Notify.ensurePermission();
+      if (!ok) {
+        s.enabled = false;
+        document.getElementById("rm-on").checked = false;
+        document.getElementById("rm-opts").style.cssText = "opacity:.45;pointer-events:none";
+        Store.save();
+        return toast("Notifications are blocked in Android settings", "⚠️");
+      }
+    }
+    Store.save();
+    const n = await Notify.reschedule();
+    if (status) status.textContent = !native ? "" : s.enabled ? n + " reminder" + (n === 1 ? "" : "s") + " scheduled" : "Reminders off";
+    App.render();
+  };
+
+  document.getElementById("rm-on").onchange = () => save(true);
+  ["rm-daily", "rm-bills", "rm-loans"].forEach(id => { document.getElementById(id).onchange = () => save(false); });
+  document.getElementById("rm-time").onchange = () => save(false);
+  save(false);
+}
+
+function statementSheet() {
+  const now = new Date();
+  const months = [];
+  for (let i = 0; i < 12; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    months.push({ y: d.getFullYear(), m: d.getMonth(), label: D.monthName(d.getFullYear(), d.getMonth()) });
+  }
+  Sheet.open(`
+    <div class="sheet-title">📄 Monthly statement</div>
+    <p class="sub center" style="margin-bottom:14px">A printable PDF with your summary, categories,
+      budgets, top places, balances and every transaction.</p>
+    <div class="field"><label>Month</label>
+      <select class="input" id="stm-month">
+        ${months.map((x, i) => `<option value="${i}">${esc(x.label)}</option>`).join("")}
+      </select></div>
+    <div class="sub center" id="stm-info" style="margin-bottom:12px"></div>
+    <button class="btn primary" id="stm-go">Create PDF</button>`);
+
+  const sel = document.getElementById("stm-month");
+  const info = document.getElementById("stm-info");
+  const refresh = () => {
+    const { y, m } = months[Number(sel.value)];
+    const n = Store.monthTx(y, m).length;
+    const spent = Store.monthTotal(y, m, "expense");
+    info.innerHTML = n ? `${n} transaction${n === 1 ? "" : "s"} · ${fmt(spent)} spent`
+      : `<span class="warn">No transactions that month</span>`;
+  };
+  sel.onchange = refresh; refresh();
+
+  document.getElementById("stm-go").onclick = async () => {
+    const { y, m } = months[Number(sel.value)];
+    const btn = document.getElementById("stm-go");
+    btn.textContent = "Building…"; btn.disabled = true;
+    try {
+      await Report.share(y, m);
+      toast("Statement ready", "📄");
+      Sheet.close();
+    } catch (e) {
+      toast("Couldn't build the PDF", "⚠️");
+      btn.textContent = "Create PDF"; btn.disabled = false;
+    }
   };
 }
 
