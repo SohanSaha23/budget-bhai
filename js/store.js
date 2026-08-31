@@ -19,6 +19,19 @@ const D = {
   monthName(y, m, short) {
     return new Date(y, m, 1).toLocaleDateString("en-IN", { month: short ? "short" : "long", year: "numeric" });
   },
+  /* "2h ago" style stamp for note timestamps */
+  ago(dt) {
+    const then = new Date(dt);
+    if (isNaN(then)) return "";
+    const secs = (Date.now() - then.getTime()) / 1000;
+    if (secs < 60) return "just now";
+    if (secs < 3600) return Math.floor(secs / 60) + "m ago";
+    if (secs < 86400) return Math.floor(secs / 3600) + "h ago";
+    const days = Math.floor(secs / 86400);
+    if (days === 1) return "yesterday";
+    if (days < 7) return days + "d ago";
+    return then.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+  },
   human(iso) {
     const t = D.todayISO();
     if (iso === t) return "Today";
@@ -72,6 +85,15 @@ const ACCOUNT_TYPES = [
 
 const AVATAR_COLORS = ["#7c6bff", "#2dd4bf", "#fb7185", "#fbbf24", "#60a5fa", "#f472b6", "#34d399", "#fb923c"];
 
+const NOTE_COLORS = ["#7c6bff", "#2dd4bf", "#fbbf24", "#fb7185", "#60a5fa", "#34d399"];
+const NOTE_TAGS = [
+  { id: "general", name: "General", emoji: "📝" },
+  { id: "expense", name: "Expenses", emoji: "💸" },
+  { id: "loan", name: "Lend & Borrow", emoji: "🤝" },
+  { id: "todo", name: "To-do", emoji: "✅" },
+  { id: "idea", name: "Ideas", emoji: "💡" },
+];
+
 /* ============ Store ============ */
 const Store = {
   state: null,
@@ -84,7 +106,7 @@ const Store = {
       },
       accounts: [], categories: DEFAULT_CATEGORIES.map(c => ({ ...c })),
       transactions: [], budgets: [], friends: [], groups: [],
-      splitExpenses: [], settlements: [], goals: [], recurring: [], loans: [],
+      splitExpenses: [], settlements: [], goals: [], recurring: [], loans: [], notes: [],
     };
   },
 
@@ -506,6 +528,42 @@ const Store = {
     return bal;
   },
 
+  /* ---------- notes ---------- */
+  newNote(tag) {
+    const now = new Date().toISOString();
+    const n = { id: uid(), title: "", body: "", color: NOTE_COLORS[0], pinned: false,
+      tag: tag || "general", created: now, updated: now };
+    this.state.notes.unshift(n);
+    this.save();
+    return n;
+  },
+  note(id) { return this.state.notes.find(n => n.id === id); },
+  updateNote(id, patch) {
+    const n = this.note(id);
+    if (!n) return;
+    Object.assign(n, patch, { updated: new Date().toISOString() });
+    this.save();
+  },
+  deleteNote(id) {
+    this.state.notes = this.state.notes.filter(n => n.id !== id);
+    this.save();
+  },
+  /* drop notes the user opened but never typed anything into */
+  pruneEmptyNotes() {
+    const before = this.state.notes.length;
+    this.state.notes = this.state.notes.filter(n => (n.title + n.body).trim() !== "");
+    if (this.state.notes.length !== before) this.save();
+  },
+  /* pinned first, then most recently edited */
+  sortedNotes(query, tag) {
+    let list = [...this.state.notes];
+    if (tag && tag !== "all") list = list.filter(n => n.tag === tag);
+    const q = (query || "").trim().toLowerCase();
+    if (q) list = list.filter(n => (n.title + " " + n.body).toLowerCase().includes(q));
+    return list.sort((a, b) =>
+      (b.pinned - a.pinned) || (a.updated < b.updated ? 1 : -1));
+  },
+
   /* ---------- lending & borrowing ---------- */
   loanPerson(l) { return l.personId ? (this.friend(l.personId)?.name || l.personName || "?") : (l.personName || "?"); },
 
@@ -807,6 +865,30 @@ const Store = {
       { id: uid(), type: "lent", personId: "f_aakash", personName: "Aakash", amount: 2000,
         date: iso(90), dueDate: "", rate: 0, note: "Concert tickets",
         repayments: [{ id: uid(), amount: 2000, date: iso(70), note: "Paid back in full" }] },
+    ];
+
+    const dt = (offset, h) => {
+      const d = D.parse(iso(offset));
+      d.setHours(h || 10, between(0, 59), 0, 0);
+      return d.toISOString();
+    };
+    s.notes = [
+      { id: uid(), tag: "loan", color: "#2dd4bf", pinned: true,
+        title: "Rahul — hospital loan terms",
+        body: "Lent 15,000 on the 9th.\nHe'll pay back in 3 parts:\n  • 5,000 — done\n  • 5,000 — end of this month\n  • 5,000 — next month\n\nNo interest. Agreed over call, no rush if salary is late.",
+        created: dt(44, 21), updated: dt(19, 20) },
+      { id: uid(), tag: "expense", color: "#fbbf24", pinned: false,
+        title: "Cash spends to add",
+        body: "Things I paid cash for and still need to log:\n- Auto to office 60\n- Tea + samosa 45\n- Barber 250\n- Sunday market veggies ~400",
+        created: dt(3, 19), updated: dt(1, 9) },
+      { id: uid(), tag: "loan", color: "#fb7185", pinned: false,
+        title: "Priya — I owe her",
+        body: "Borrowed 8,000 for the laptop repair.\nPaid back 4,000 already.\n4,000 left — she said before Diwali is fine.",
+        created: dt(58, 18), updated: dt(24, 13) },
+      { id: uid(), tag: "todo", color: "#7c6bff", pinned: false,
+        title: "Money to-do this month",
+        body: "☐ Cancel the extra streaming subscription\n☐ Move 5,000 to emergency fund\n☐ Ask landlord about the water bill split\n☑ Renew bike insurance",
+        created: dt(8, 11), updated: dt(2, 16) },
     ];
 
     const nextDom = (dom) => {

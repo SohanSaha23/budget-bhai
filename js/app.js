@@ -1,6 +1,9 @@
 /* ============ Paisa — app controller ============ */
 "use strict";
 
+/* Holds the note editor's pending-save hook so navigation can flush it. */
+const NoteEditor = { flush: null };
+
 /* ---------------- app lock (4-digit PIN + optional fingerprint) ---------------- */
 const PIN_LEN = 4;
 
@@ -228,9 +231,16 @@ const App = {
     }
   },
 
+  /* save any half-typed note before the view changes */
+  flushNote() {
+    if (NoteEditor.flush) NoteEditor.flush();
+    Store.pruneEmptyNotes();
+  },
+
   /* navigate deeper: remember where we came from */
   push(state) {
-    UI.stack.push({ view: UI.view, groupId: UI.groupId, friendId: UI.friendId, accountId: UI.accountId });
+    if (UI.view === "noteEdit") this.flushNote();
+    UI.stack.push({ view: UI.view, groupId: UI.groupId, friendId: UI.friendId, accountId: UI.accountId, noteId: UI.noteId });
     Object.assign(UI, { groupId: null, friendId: null, accountId: null }, state);
     if (Sheet.isOpen()) Sheet.close();
     this.render();
@@ -239,6 +249,7 @@ const App = {
   back() {
     if (Lock.locked) return;                    // can't navigate past the lock screen
     if (Sheet.isOpen()) { Sheet.close(); return; }
+    if (UI.view === "noteEdit") this.flushNote();
     if (UI.stack.length) {
       const s = UI.stack.pop();
       Object.assign(UI, { groupId: null, friendId: null, accountId: null }, s);
@@ -287,6 +298,7 @@ const App = {
   /* bottom-nav tabs are root destinations: back from any tab goes home */
   go(view) {
     if (UI.view === view) return;
+    if (UI.view === "noteEdit") this.flushNote();
     UI.stack = view === "home" ? [] : [{ view: "home", groupId: null, friendId: null, accountId: null }];
     UI.view = view;
     UI.groupId = UI.friendId = UI.accountId = null;
@@ -310,6 +322,7 @@ const App = {
     if (v === "splits" || v === "groupDetail") splitSheet(UI.groupId ? { group: UI.groupId } : null);
     else if (v === "friendDetail") splitSheet({ friend: UI.friendId });
     else if (v === "accounts" || v === "accountDetail") accountSheet();
+    else if (v === "notes" || v === "noteEdit") Actions["note-new"]();
     else if (v === "loans") loanSheet();
     else if (v === "goals") goalSheet();
     else if (v === "recurring") recurringSheet();
@@ -376,6 +389,23 @@ const Actions = {
   "open-goals": () => App.push({ view: "goals" }),
   "open-recurring": () => App.push({ view: "recurring" }),
   "open-loans": () => App.push({ view: "loans" }),
+  "open-notes": () => { UI.notesQuery = ""; UI.notesTag = "all"; App.push({ view: "notes" }); },
+  "notes-tag": d => { UI.notesTag = d.t; App.render(); },
+  "note-new": () => { const n = Store.newNote(UI.notesTag !== "all" ? UI.notesTag : "general"); App.push({ view: "noteEdit", noteId: n.id }); },
+  "note-open": d => App.push({ view: "noteEdit", noteId: d.id }),
+  "note-pin": d => {
+    const n = Store.note(d.id);
+    if (!n) return;
+    Store.updateNote(d.id, { pinned: !n.pinned });
+    toast(n.pinned ? "Unpinned" : "Pinned to top", n.pinned ? "" : "📌");
+    App.render();
+  },
+  "note-delete": d => confirmSheet("Delete this note?", "It can't be recovered.", "Delete", () => {
+    Store.deleteNote(d.id);
+    NoteEditor.flush = null;
+    toast("Note deleted", "🗑️");
+    if (UI.view === "noteEdit") App.back(); else App.render();
+  }),
   "loans-tab": d => { UI.loansTab = d.t; App.render(); },
   "add-loan": () => loanSheet(),
   "loan-detail": d => loanDetailSheet(d.id),

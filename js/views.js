@@ -11,6 +11,7 @@ const UI = {
   splitsTab: "friends",
   splitPeriod: "monthly",
   loansTab: "lent",
+  noteId: null, notesQuery: "", notesTag: "all",
   transFilter: { q: "", type: "all", cat: "all", acc: "all" },
   groupId: null, friendId: null, accountId: null,
 };
@@ -901,6 +902,140 @@ const Views = {
     ${list.length ? groupTxByDate(list) : '<div class="empty"><div class="big">🗒️</div>No transactions in this account.</div>'}`;
   },
 
+  /* ================= NOTES ================= */
+  notes() {
+    const list = Store.sortedNotes(UI.notesQuery, UI.notesTag);
+    const pinned = list.filter(n => n.pinned);
+    const rest = list.filter(n => !n.pinned);
+    const total = Store.state.notes.length;
+
+    const card = (n) => {
+      const tag = NOTE_TAGS.find(t => t.id === n.tag) || NOTE_TAGS[0];
+      const title = n.title.trim() || n.body.trim().split("\n")[0] || "Untitled note";
+      const snippet = n.body.trim().split("\n").filter(l => l.trim() && l.trim() !== n.title.trim()).slice(0, 2).join(" · ");
+      return `<div class="note-card" data-action="note-open" data-id="${n.id}" style="--nc:${n.color}">
+        <div class="note-top">
+          <div class="note-title">${esc(title)}</div>
+          <button class="note-pin ${n.pinned ? "on" : ""}" data-action="note-pin" data-id="${n.id}" aria-label="Pin">
+            <svg viewBox="0 0 24 24"><path d="M9 4h6l-1 6 4 3v2H6v-2l4-3-1-6Z"/><path d="M12 15v5"/></svg>
+          </button>
+        </div>
+        ${snippet ? `<div class="note-snip">${esc(snippet)}</div>` : ""}
+        <div class="note-foot"><span>${tag.emoji} ${esc(tag.name)}</span><span>${D.ago(n.updated)}</span></div>
+      </div>`;
+    };
+
+    return `
+    <div class="back-head">
+      <button class="icon-btn" data-action="back"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>
+      <span class="h1">Notes</span>
+      <button class="icon-btn" data-action="note-new"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+    </div>
+    ${total ? `<div class="search-row">
+      <input class="input" id="note-search" placeholder="🔍  Search notes…" value="${esc(UI.notesQuery)}">
+    </div>
+    <div class="filter-chips">
+      <button class="chip ${UI.notesTag === "all" ? "on" : ""}" data-action="notes-tag" data-t="all">All</button>
+      ${NOTE_TAGS.map(t => `<button class="chip ${UI.notesTag === t.id ? "on" : ""}" data-action="notes-tag" data-t="${t.id}">
+        <span class="em">${t.emoji}</span>${esc(t.name)}</button>`).join("")}
+    </div>` : ""}
+
+    ${!total ? `<div class="empty"><div class="big">🗒️</div>
+        No notes yet.<br>Jot down cash spends, loan terms, anything.</div>
+      <button class="btn primary" data-action="note-new">＋ Write your first note</button>`
+      : !list.length ? '<div class="empty"><div class="big">🔎</div>Nothing matches that.</div>'
+      : `${pinned.length ? `<div class="sec"><span class="h2">📌 Pinned</span></div>
+          <div class="note-list stagger">${pinned.map(card).join("")}</div>` : ""}
+         ${rest.length ? `${pinned.length ? '<div class="sec"><span class="h2">Others</span></div>' : ""}
+          <div class="note-list stagger">${rest.map(card).join("")}</div>` : ""}`}`;
+  },
+
+  notesAfter() {
+    const s = document.getElementById("note-search");
+    if (s) s.addEventListener("input", () => {
+      UI.notesQuery = s.value;
+      const pos = s.selectionStart;
+      App.render();
+      const s2 = document.getElementById("note-search");
+      if (s2) { s2.focus(); s2.setSelectionRange(pos, pos); }
+    });
+  },
+
+  /* full-page editor — a cramped bottom sheet is no good for real writing */
+  noteEdit() {
+    const n = Store.note(UI.noteId);
+    if (!n) { UI.view = "notes"; return Views.notes(); }
+    const tag = NOTE_TAGS.find(t => t.id === n.tag) || NOTE_TAGS[0];
+    return `
+    <div class="back-head">
+      <button class="icon-btn" data-action="back"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>
+      <span class="h1" style="font-size:15px;color:var(--muted);font-weight:600">${tag.emoji} ${esc(tag.name)}</span>
+      <button class="icon-btn ${n.pinned ? "pin-on" : ""}" data-action="note-pin" data-id="${n.id}" title="Pin">
+        <svg viewBox="0 0 24 24"><path d="M9 4h6l-1 6 4 3v2H6v-2l4-3-1-6Z"/><path d="M12 15v5"/></svg>
+      </button>
+      <button class="icon-btn" data-action="note-delete" data-id="${n.id}" title="Delete">
+        <svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2m-8 0 1 13h8l1-13"/></svg>
+      </button>
+    </div>
+
+    <div class="note-editor" style="--nc:${n.color}">
+      <input class="note-input-title" id="ne-title" placeholder="Title" value="${esc(n.title)}">
+      <textarea class="note-input-body" id="ne-body" placeholder="Start writing…&#10;&#10;e.g. Lent 2,000 to Vikram on the 3rd — he'll return after salary.">${esc(n.body)}</textarea>
+    </div>
+
+    <div class="note-tools">
+      <div class="note-colors" id="ne-colors">
+        ${NOTE_COLORS.map(c => `<button class="${c === n.color ? "on" : ""}" style="background:${c}" data-c="${c}"></button>`).join("")}
+      </div>
+      <select class="input" id="ne-tag" style="width:auto;padding:8px 30px 8px 12px;border-radius:12px;font-size:13px">
+        ${NOTE_TAGS.map(t => `<option value="${t.id}" ${t.id === n.tag ? "selected" : ""}>${t.emoji} ${esc(t.name)}</option>`).join("")}
+      </select>
+    </div>
+    <div class="sub center mt8" id="ne-saved">Saved ${D.ago(n.updated)}</div>`;
+  },
+
+  noteEditAfter() {
+    const title = document.getElementById("ne-title");
+    const body = document.getElementById("ne-body");
+    const stamp = document.getElementById("ne-saved");
+    if (!title || !body) return;
+
+    const grow = () => { body.style.height = "auto"; body.style.height = Math.max(260, body.scrollHeight) + "px"; };
+    grow();
+
+    let timer = null;
+    const queueSave = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        Store.updateNote(UI.noteId, { title: title.value, body: body.value });
+        if (stamp) stamp.textContent = "Saved just now";
+      }, 400);
+    };
+    title.addEventListener("input", queueSave);
+    body.addEventListener("input", () => { grow(); queueSave(); });
+
+    // flushed by App.back()/App.go() so nothing is lost on the way out
+    NoteEditor.flush = () => {
+      clearTimeout(timer);
+      const t = document.getElementById("ne-title"), b = document.getElementById("ne-body");
+      if (t && b && UI.noteId) Store.updateNote(UI.noteId, { title: t.value, body: b.value });
+      NoteEditor.flush = null;
+    };
+
+    document.getElementById("ne-colors").onclick = (e) => {
+      const btn = e.target.closest("[data-c]");
+      if (!btn) return;
+      Store.updateNote(UI.noteId, { color: btn.dataset.c });
+      document.querySelectorAll("#ne-colors button").forEach(x => x.classList.toggle("on", x.dataset.c === btn.dataset.c));
+      document.querySelector(".note-editor").style.setProperty("--nc", btn.dataset.c);
+    };
+    document.getElementById("ne-tag").onchange = (e) => {
+      Store.updateNote(UI.noteId, { tag: e.target.value });
+      App.render();
+    };
+    if (!title.value && !body.value) title.focus();
+  },
+
   /* ================= LEND & BORROW ================= */
   loans() {
     const s = Store.state;
@@ -1063,6 +1198,7 @@ const Views = {
       ${item("🧑‍🤝‍🧑", "Splits", "friends & groups", "open-splits")}
       ${item("🏦", "Accounts", fmt(Store.netWorth()), "open-accounts")}
       ${item("🎯", "Budgets", "", "open-budgets")}
+      ${item("🗒️", "Notes", Store.state.notes.length ? Store.state.notes.length + " saved" : "none yet", "open-notes")}
       ${item("🤝", "Lend & Borrow", (() => { const t = Store.loanTotals();
         return t.lentOut || t.borrowed ? fmt(t.lentOut) + " out · " + fmt(t.borrowed) + " owed" : "none active"; })(), "open-loans")}
       ${item("🐷", "Savings Goals", Store.state.goals.length + " active", "open-goals")}
@@ -1083,6 +1219,6 @@ const Views = {
       ${item("🧪", "Reset demo data", "", "reset-demo")}
       ${item("🗑️", "Erase everything", "", "erase-all")}
     </div>
-    <p class="sub center" style="margin-top:18px">Budget Bhai · v1.9 · data stays on your device 🔒</p>`;
+    <p class="sub center" style="margin-top:18px">Budget Bhai · v2.0 · data stays on your device 🔒</p>`;
   },
 };
