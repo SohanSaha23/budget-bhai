@@ -14,6 +14,8 @@ const UI = {
   loansTab: "lent",
   noteId: null, notesQuery: "", notesTag: "all",
   friendTab: "activity",
+  splitCat: { period: "all", anchor: D.todayISO(),
+    custom: { from: D.addDays(D.todayISO(), -29), to: D.todayISO() } },
   transFilter: { q: "", type: "all", cat: "all", acc: "all", scope: "all" },
   groupId: null, friendId: null, accountId: null,
 };
@@ -78,17 +80,74 @@ function splitCat(e) { return Store.cat(e.categoryId || "c_other"); }
 
 /* "where does my money with this person go" — donut + ranked categories.
    Pass no friendId for every split you're part of. */
+/* the window the split-category panel is currently showing */
+function splitCatRange() {
+  const s = UI.splitCat;
+  if (s.period === "all") return { from: "", to: "", label: "All time" };
+  if (s.period === "custom") return { from: s.custom.from, to: s.custom.to,
+    label: D.short(s.custom.from) + " – " + D.short(s.custom.to) };
+  if (s.period === "daily") return { from: s.anchor, to: s.anchor, label: D.human(s.anchor) };
+  if (s.period === "weekly") {
+    const from = D.weekStart(s.anchor);
+    return { from, to: D.addDays(from, 6), label: D.short(from) + " – " + D.short(D.addDays(from, 6)) };
+  }
+  const [y, m] = s.anchor.split("-").map(Number);
+  return {
+    from: s.anchor.slice(0, 7) + "-01",
+    to: s.anchor.slice(0, 7) + "-" + String(D.daysInMonth(y, m - 1)).padStart(2, "0"),
+    label: D.monthName(y, m - 1),
+  };
+}
+
+function splitCatControls() {
+  const s = UI.splitCat;
+  const { label } = splitCatRange();
+  return `
+    <div class="seg" style="margin-bottom:10px">
+      ${[["all", "All"], ["daily", "Day"], ["weekly", "Week"], ["monthly", "Month"], ["custom", "Range"]]
+        .map(([k, lb]) => `<button class="${s.period === k ? "on" : ""}" data-action="splitcat-period" data-p="${k}" style="font-size:12px">${lb}</button>`).join("")}
+    </div>
+    ${s.period === "custom" ? `
+      <div class="card flat" style="padding:12px 14px">
+        <div class="row2">
+          <div class="field" style="margin:0"><label>From</label>
+            <input class="input" type="date" id="sc-from" value="${s.custom.from}"></div>
+          <div class="field" style="margin:0"><label>To</label>
+            <input class="input" type="date" id="sc-to" value="${s.custom.to}"></div>
+        </div>
+        <div class="chips" style="margin-top:10px">
+          ${[["7 days", 7], ["30 days", 30], ["90 days", 90]].map(([lb, n]) =>
+            `<button class="chip" data-action="splitcat-preset" data-n="${n}">${lb}</button>`).join("")}
+        </div>
+      </div>`
+    : s.period === "all" ? ""
+    : `<div class="month-sel">
+        <button data-action="splitcat-prev">‹</button>
+        <div class="m">${esc(label)}</div>
+        <button data-action="splitcat-next">›</button>
+      </div>`}`;
+}
+
+/* "where does my money with this person go" — donut + ranked, tappable categories.
+   Pass no friendId for every split you're part of. */
 function splitCategoryPanel(friendId, who) {
-  const rows = Store.splitCategoryBreakdown(friendId);
-  if (!rows.length) return `<div class="empty"><div class="big">🍰</div>No shared expenses to break down yet.</div>`;
+  const { from, to, label } = splitCatRange();
+  const rows = Store.splitCategoryBreakdown(friendId, from, to);
+  const controls = splitCatControls();
+  if (!rows.length) {
+    return controls + `<div class="empty"><div class="big">🍰</div>
+      No shared expenses ${UI.splitCat.period === "all" ? "yet" : "in " + esc(label)}.</div>`;
+  }
   const mineTotal = rows.reduce((s, r) => s + r.mine, 0);
   const sharedTotal = rows.reduce((s, r) => s + r.total, 0);
+  const theirTotal = rows.reduce((s, r) => s + (r.theirs || 0), 0);
+  const count = rows.reduce((s, r) => s + r.count, 0);
   const donut = rows.slice(0, 6).map(r => ({ label: r.cat.name, value: r.mine, color: r.cat.color }));
   const rest = rows.slice(6).reduce((s, r) => s + r.mine, 0);
   if (rest > 0) donut.push({ label: "Others", value: rest, color: "#64748b" });
   const top = rows[0];
 
-  return `
+  return controls + `
     <div class="card">
       <div class="donut-wrap">
         ${Charts.donut(donut, 150, "Your share", fmt(mineTotal))}
@@ -98,20 +157,26 @@ function splitCategoryPanel(friendId, who) {
         </div>
       </div>
       <div class="divider"></div>
-      <div class="sub center">Biggest with ${esc(who)}: <b>${top.cat.emoji} ${esc(top.cat.name)}</b> —
-        ${fmt(top.mine)} of your ${fmt(mineTotal)}<br>
-        <span style="font-size:11px">${fmt(sharedTotal)} total billed across ${rows.reduce((s, r) => s + r.count, 0)} shared expenses</span></div>
+      <div class="sum3">
+        <div class="cell"><div class="lab">Your share</div><div class="val money">${fmt(mineTotal)}</div></div>
+        ${friendId ? `<div class="cell"><div class="lab">${esc(who)}'s share</div><div class="val money">${fmt(theirTotal)}</div></div>` : ""}
+        <div class="cell"><div class="lab">Total billed</div><div class="val money">${fmt(sharedTotal)}</div></div>
+      </div>
+      <div class="sub center">Biggest ${friendId ? "with " + esc(who) : ""}: <b>${top.cat.emoji} ${esc(top.cat.name)}</b>
+        — ${fmt(top.mine)} across ${count} shared expense${count === 1 ? "" : "s"} · ${esc(label)}</div>
     </div>
+    <div class="sec"><span class="h2">Tap a category for details</span></div>
     <div class="card flat stagger" style="padding:10px 12px">
       ${rows.map(r => {
         const pc = mineTotal ? Math.round(r.mine / mineTotal * 100) : 0;
-        return `<div class="rank">
+        return `<div class="rank" data-action="splitcat-open" data-cat="${r.cat.id}" data-friend="${friendId || ""}">
           <div class="emo" style="background:${tint(r.cat.color, .16)}">${r.cat.emoji}</div>
           <div class="mid">
             <div class="nm"><span>${esc(r.cat.name)} <span class="sub">${pc}%</span></span><b class="money">${fmt(r.mine)}</b></div>
             <div class="bar"><i style="width:${pc}%;background:${r.cat.color}"></i></div>
-            <div class="sub" style="margin-top:4px;font-size:11px">${r.count} expense${r.count === 1 ? "" : "s"} · ${fmt(r.total)} total bill</div>
+            <div class="sub" style="margin-top:4px;font-size:11px">${r.count} expense${r.count === 1 ? "" : "s"} · ${fmt(r.total)} total bill${friendId && r.theirs ? " · " + esc(who) + " " + fmt(r.theirs) : ""}</div>
           </div>
+          <span class="chev sub">›</span>
         </div>`;
       }).join("")}
     </div>`;
@@ -1100,6 +1165,23 @@ const Views = {
           <div class="note-list stagger">${rest.map(card).join("")}</div>` : ""}`}`;
   },
 
+  /* custom-range inputs inside the split category panel */
+  wireSplitCatRange() {
+    const f = document.getElementById("sc-from"), t = document.getElementById("sc-to");
+    if (!f || !t) return;
+    const apply = () => {
+      let from = f.value, to = t.value;
+      if (!from || !to) return;
+      if (from > to) [from, to] = [to, from];
+      UI.splitCat.custom = { from, to };
+      App.render();
+    };
+    f.onchange = apply; t.onchange = apply;
+  },
+
+  splitsAfter() { Views.wireSplitCatRange(); },
+  friendDetailAfter() { Views.wireSplitCatRange(); },
+
   notesAfter() {
     const s = document.getElementById("note-search");
     if (s) s.addEventListener("input", () => {
@@ -1371,6 +1453,6 @@ const Views = {
       ${item("🧪", "Reset demo data", "", "reset-demo")}
       ${item("🗑️", "Erase everything", "", "erase-all")}
     </div>
-    <p class="sub center" style="margin-top:18px">Budget Bhai · v2.1 · data stays on your device 🔒</p>`;
+    <p class="sub center" style="margin-top:18px">Budget Bhai · v2.2 · data stays on your device 🔒</p>`;
   },
 };

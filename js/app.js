@@ -398,6 +398,15 @@ const App = {
     this.render();
   },
 
+  /* step the split-category window by one period unit */
+  splitCatMove(dir) {
+    const s = UI.splitCat;
+    if (s.period === "daily") s.anchor = D.addDays(s.anchor, dir);
+    else if (s.period === "weekly") s.anchor = D.addDays(s.anchor, 7 * dir);
+    else if (s.period === "monthly") s.anchor = D.addMonths(s.anchor, dir);
+    this.render();
+  },
+
   /* contextual FAB */
   fab() {
     const v = UI.view;
@@ -551,6 +560,15 @@ const Actions = {
   "splits-tab": d => { UI.splitsTab = d.tab; App.render(); },
   "split-period": d => { UI.splitPeriod = d.p; App.render(); },
   "friend-tab": d => { UI.friendTab = d.t; App.render(); },
+  "splitcat-period": d => { UI.splitCat.period = d.p; UI.splitCat.anchor = D.todayISO(); App.render(); },
+  "splitcat-prev": () => { App.splitCatMove(-1); },
+  "splitcat-next": () => { App.splitCatMove(1); },
+  "splitcat-preset": d => {
+    const n = Number(d.n);
+    UI.splitCat.custom = { from: D.addDays(D.todayISO(), -(n - 1)), to: D.todayISO() };
+    App.render();
+  },
+  "splitcat-open": d => splitCategorySheet(d.cat, d.friend || null, splitCatRange()),
   "settle-edit": d => settleSheet({ edit: d.id }),
   "tx-filter-type": d => { UI.transFilter.type = d.type; App.render(); },
   "tx-scope": d => {

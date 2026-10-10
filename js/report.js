@@ -135,16 +135,25 @@ const Report = {
     const buds = Store.state.budgets;
     if (buds.length) {
       heading("Budgets");
+      // two lines per budget: the long "spent / total" figure needs the full width
       buds.forEach(b => {
         const st = Store.budgetStatus(b, y, m);
         const nm = b.categoryId === "ALL" ? "Overall" : Store.cat(b.categoryId).name;
-        row([
-          { text: nm, x: M },
-          { text: st.pct + "% used", x: W - M - 150, align: "right", color: MUTED },
-          { text: st.over ? "over by " + this.money(-st.left) : this.money(st.left) + " left",
-            x: W - M - 80, align: "right", color: st.over ? RED : GREEN },
-          { text: this.money(st.spent) + " / " + this.money(b.amount), x: W - M, align: "right", bold: true },
-        ], { rule: true });
+        room(28);
+        doc.setFont("helvetica", "normal").setFontSize(9.5).setTextColor(...INK);
+        doc.text(nm, M, cursor);
+        doc.setFont("helvetica", "bold");
+        doc.text(this.money(st.spent) + " / " + this.money(b.amount), W - M, cursor, { align: "right" });
+        cursor += 11;
+        doc.setFont("helvetica", "normal").setFontSize(8).setTextColor(...MUTED);
+        doc.text(st.pct + "% used", M, cursor);
+        doc.setTextColor(...(st.over ? RED : GREEN));
+        doc.text(st.over ? "over by " + this.money(-st.left) : this.money(st.left) + " left",
+          W - M, cursor, { align: "right" });
+        cursor += 9;
+        doc.setDrawColor(...LINE); doc.setLineWidth(0.5);
+        doc.line(M, cursor - 3, W - M, cursor - 3);
+        cursor += 7;
       });
     }
 
@@ -177,23 +186,38 @@ const Report = {
       row([{ text: "Date", x: M }, { text: "Details", x: M + 58 },
            { text: "Account", x: W - M - 130, align: "right" }, { text: "Amount", x: W - M, align: "right" }],
           { bold: true, size: 8.5, color: MUTED, gap: 14 });
+      const detailX = M + 58;
+      const detailW = (W - M - 140) - detailX;        // stop short of the account column
       txs.forEach(t => {
         const isTrf = t.type === "transfer";
         const cat = isTrf ? "Transfer" : Store.cat(t.categoryId).name;
-        const name = t.payee || cat;
-        const label = name.length > 34 ? name.slice(0, 33) + "…" : name;
         const sign = t.type === "income" ? "+" : t.type === "expense" ? "-" : "";
-        row([
-          { text: D.parse(t.date).getDate() + " " + D.parse(t.date).toLocaleDateString("en-IN", { month: "short" }), x: M, color: MUTED },
-          { text: label, x: M + 58 },
-          { text: (Store.acc(t.accountId) || {}).name || "", x: W - M - 130, align: "right", color: MUTED },
-          { text: sign + this.money(t.amount), x: W - M, align: "right", bold: true,
-            color: t.type === "income" ? GREEN : isTrf ? MUTED : RED },
-        ], { gap: 14, rule: true, size: 9 });
-        if (t.note) {
+
+        // measure first so the row, its note and the rule never share a line
+        doc.setFont("helvetica", "normal").setFontSize(9);
+        const nameLines = doc.splitTextToSize(t.payee || cat, detailW).slice(0, 1);
+        doc.setFont("helvetica", "italic").setFontSize(7.5);
+        const noteLines = t.note ? doc.splitTextToSize(t.note, detailW).slice(0, 2) : [];
+        const blockH = 13 + noteLines.length * 9 + 5;
+        room(blockH + 6);
+
+        doc.setFont("helvetica", "normal").setFontSize(9).setTextColor(...MUTED);
+        doc.text(D.parse(t.date).getDate() + " " + D.parse(t.date).toLocaleDateString("en-IN", { month: "short" }), M, cursor);
+        doc.text((Store.acc(t.accountId) || {}).name || "", W - M - 130, cursor, { align: "right" });
+        doc.setTextColor(...INK);
+        doc.text(nameLines[0] || "", detailX, cursor);
+        doc.setFont("helvetica", "bold").setTextColor(...(t.type === "income" ? GREEN : isTrf ? MUTED : RED));
+        doc.text(sign + this.money(t.amount), W - M, cursor, { align: "right" });
+        cursor += 11;
+
+        if (noteLines.length) {
           doc.setFont("helvetica", "italic").setFontSize(7.5).setTextColor(...MUTED);
-          doc.text(t.note.slice(0, 70), M + 58, cursor - 6);
+          noteLines.forEach(ln => { doc.text(ln, detailX, cursor); cursor += 9; });
+          cursor += 1;
         }
+        cursor += 5;
+        doc.setDrawColor(...LINE); doc.setLineWidth(0.5);
+        doc.line(M, cursor - 7, W - M, cursor - 7);
       });
     }
 

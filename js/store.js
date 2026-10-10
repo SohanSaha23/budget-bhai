@@ -66,10 +66,15 @@ const DEFAULT_CATEGORIES = [
   { id: "c_subs", name: "Subscriptions", emoji: "📺", color: "#e879f9", type: "expense" },
   { id: "c_care", name: "Personal Care", emoji: "💇", color: "#f9a8d4", type: "expense" },
   { id: "c_gift", name: "Gifts", emoji: "🎁", color: "#fca5a5", type: "expense" },
+  { id: "c_trade", name: "Trade", emoji: "📉", color: "#f87171", type: "expense" },
   { id: "c_other", name: "Other", emoji: "📦", color: "#94a3b8", type: "expense" },
   { id: "c_salary", name: "Salary", emoji: "💼", color: "#34d399", type: "income" },
   { id: "c_biz", name: "Business", emoji: "🏪", color: "#fbbf24", type: "income" },
   { id: "c_invest", name: "Investments", emoji: "📈", color: "#60a5fa", type: "income" },
+  { id: "c_tradein", name: "Trade", emoji: "💹", color: "#22d3ee", type: "income" },
+  { id: "c_cashback", name: "Cashback/Interest", emoji: "💳", color: "#4ade80", type: "income" },
+  { id: "c_transferin", name: "Transfer", emoji: "🔄", color: "#818cf8", type: "income" },
+  { id: "c_deposit", name: "Cash Deposit", emoji: "🏧", color: "#a3e635", type: "income" },
   { id: "c_giftin", name: "Gifts", emoji: "🧧", color: "#f472b6", type: "income" },
   { id: "c_refund", name: "Refunds", emoji: "💸", color: "#2dd4bf", type: "income" },
   { id: "c_otherin", name: "Other", emoji: "💰", color: "#94a3b8", type: "income" },
@@ -127,6 +132,13 @@ const Store = {
     this.state.settings.reminders = Object.assign({}, def.settings.reminders, this.state.settings.reminders);
     for (const key of Object.keys(def)) {
       if (key !== "settings" && !Array.isArray(this.state[key])) this.state[key] = def[key];
+    }
+    // add built-in categories shipped in later versions, leaving the user's own alone
+    const have = new Set(this.state.categories.map(c => c.id));
+    const extras = DEFAULT_CATEGORIES.filter(c => !have.has(c.id));
+    if (extras.length) {
+      this.state.categories.push(...extras.map(c => ({ ...c })));
+      this.save();
     }
   },
 
@@ -569,19 +581,35 @@ const Store = {
   /* ---------- split spending by category ----------
      Counts every shared expense (1-to-1 and group) that you and `friendId`
      were both part of. Pass no id for every split you're in. */
-  splitCategoryBreakdown(friendId) {
+  splitExpensesWith(friendId, from, to) {
+    return this.state.splitExpenses.filter(e => {
+      if (!e.shares.some(s => s.id === "me")) return false;
+      if (friendId && !e.shares.some(s => s.id === friendId)) return false;
+      if (from && e.date < from) return false;
+      if (to && e.date > to) return false;
+      return true;
+    }).sort((a, b) => a.date < b.date ? 1 : -1);
+  },
+
+  splitCategoryBreakdown(friendId, from, to) {
     const map = {};
-    for (const e of this.state.splitExpenses) {
+    for (const e of this.splitExpensesWith(friendId, from, to)) {
       const mine = e.shares.find(s => s.id === "me");
-      if (!mine) continue;
-      if (friendId && !e.shares.some(s => s.id === friendId)) continue;
+      const theirs = friendId ? e.shares.find(s => s.id === friendId) : null;
       const c = this.cat(e.categoryId || "c_other");
-      if (!map[c.id]) map[c.id] = { cat: c, mine: 0, total: 0, count: 0 };
+      if (!map[c.id]) map[c.id] = { cat: c, mine: 0, theirs: 0, total: 0, count: 0 };
       map[c.id].mine += mine.amount;
+      if (theirs) map[c.id].theirs += theirs.amount;
       map[c.id].total += e.amount;
       map[c.id].count++;
     }
     return Object.values(map).sort((a, b) => b.mine - a.mine);
+  },
+
+  /* the individual shared expenses behind one category slice */
+  splitExpensesInCategory(catId, friendId, from, to) {
+    return this.splitExpensesWith(friendId, from, to)
+      .filter(e => (e.categoryId || "c_other") === catId);
   },
 
   /* ---------- notes ---------- */

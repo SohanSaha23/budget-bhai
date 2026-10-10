@@ -524,6 +524,63 @@ function splitSheet(ctx) {
   };
 }
 
+/* every shared expense behind one category slice — where, with whom, how much */
+function splitCategorySheet(catId, friendId, range) {
+  const c = Store.cat(catId);
+  const who = friendId ? (Store.friend(friendId)?.name || "") : "";
+  const list = Store.splitExpensesInCategory(catId, friendId || null, range.from, range.to);
+  const mineTotal = list.reduce((s, e) => s + (e.shares.find(x => x.id === "me")?.amount || 0), 0);
+  const theirTotal = friendId
+    ? list.reduce((s, e) => s + (e.shares.find(x => x.id === friendId)?.amount || 0), 0) : 0;
+  const billTotal = list.reduce((s, e) => s + e.amount, 0);
+
+  const card = (e) => {
+    const mine = e.shares.find(x => x.id === "me");
+    const payer = Store.friend(e.paidBy);
+    const iPaid = e.paidBy === "me";
+    const group = e.groupId ? Store.group(e.groupId) : null;
+    return `<div class="card flat scx" style="margin-bottom:10px;padding:12px 13px">
+      <div class="card-row">
+        <div style="min-width:0">
+          <div class="nm" style="font-weight:700;font-size:14.5px">${esc(e.desc)}</div>
+          <div class="sub" style="margin-top:3px">${D.human(e.date)}${group ? " · " + group.emoji + " " + esc(group.name) : " · 1-to-1"}</div>
+        </div>
+        <div style="text-align:right;flex:none">
+          <div class="money" style="font-weight:700">${fmt(e.amount)}</div>
+          <div class="sub" style="font-size:11px">total bill</div>
+        </div>
+      </div>
+      <div class="sub" style="margin:9px 0 7px">
+        ${iPaid ? "<b>You</b> paid" : "<b>" + esc(payer?.name || "?") + "</b> paid"} · split ${e.shares.length} ways
+      </div>
+      <div class="share-chips">
+        ${e.shares.map(sh => {
+          const p = Store.friend(sh.id);
+          const isMe = sh.id === "me", isThem = sh.id === friendId;
+          return `<span class="share-chip ${isMe ? "me" : isThem ? "them" : ""}">
+            <i style="background:${p?.color || "#888"}"></i>${esc(isMe ? "You" : (p?.name || "?"))} ${fmt(sh.amount)}</span>`;
+        }).join("")}
+      </div>
+      <button class="btn ghost sm mt8" data-action="split-detail" data-id="${e.id}">Open this split</button>
+      <span class="sub" style="float:right;margin-top:14px">your share <b class="money">${fmt(mine ? mine.amount : 0)}</b></span>
+    </div>`;
+  };
+
+  Sheet.open(`
+    <div class="sheet-title">${c.emoji} ${esc(c.name)}</div>
+    <div class="sub center" style="margin-bottom:12px">
+      ${friendId ? "with " + esc(who) : "across all splits"} · ${esc(range.label)}</div>
+    <div class="sum3" style="margin-bottom:14px">
+      <div class="cell"><div class="lab">Your share</div><div class="val money">${fmt(mineTotal)}</div></div>
+      ${friendId ? `<div class="cell"><div class="lab">${esc(who)}</div><div class="val money">${fmt(theirTotal)}</div></div>` : ""}
+      <div class="cell"><div class="lab">Total billed</div><div class="val money">${fmt(billTotal)}</div></div>
+    </div>
+    <div style="max-height:52vh;overflow-y:auto;margin:0 -2px;padding:0 2px">
+      ${list.length ? list.map(card).join("") : '<div class="empty">Nothing here.</div>'}
+    </div>
+    <button class="btn ghost mt8" data-action="close-sheet">Close</button>`);
+}
+
 function splitDetailSheet(id) {
   const e = Store.state.splitExpenses.find(x => x.id === id);
   if (!e) return;
@@ -934,8 +991,13 @@ function categorySheet(editId) {
       <button data-ct="income">Income</button>
     </div>` : ""}
     <div class="field"><label>Name</label><input class="input" id="ct-name" value="${c ? esc(c.name) : ""}" placeholder="e.g. Pet care"></div>
-    <div class="field"><label>Icon</label><div class="emoji-grid" id="ct-emoji">
-      ${EMOJI_CHOICES.map(e => `<button class="${e === emoji ? "on" : ""}" data-e="${e}">${e}</button>`).join("")}</div></div>
+    <div class="field"><label>Icon <span class="sub">${EMOJI_CHOICES.length} to choose from</span></label>
+      <div class="emoji-box" id="ct-emoji">
+        ${EMOJI_GROUPS.map(([name, list]) => `
+          <div class="emoji-group-name">${esc(name)}</div>
+          <div class="emoji-grid">${list.map(e =>
+            `<button class="${e === emoji ? "on" : ""}" data-e="${e}">${e}</button>`).join("")}</div>`).join("")}
+      </div></div>
     <div class="field"><label>Colour</label><div class="color-row" id="ct-colors">
       ${COLORS.map(cl => `<button style="background:${cl}" class="${cl === color ? "on" : ""}" data-c="${cl}"></button>`).join("")}</div></div>
     <button class="btn primary" id="ct-save">${c ? "Save" : "Create category"}</button>
