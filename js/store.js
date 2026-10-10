@@ -581,10 +581,14 @@ const Store = {
   /* ---------- split spending by category ----------
      Counts every shared expense (1-to-1 and group) that you and `friendId`
      were both part of. Pass no id for every split you're in. */
+  /* you count as involved if you paid or took a share — paying the whole bill
+     for someone else still belongs in your split history */
+  splitInvolves(e, id) { return e.paidBy === id || e.shares.some(s => s.id === id); },
+
   splitExpensesWith(friendId, from, to) {
     return this.state.splitExpenses.filter(e => {
-      if (!e.shares.some(s => s.id === "me")) return false;
-      if (friendId && !e.shares.some(s => s.id === friendId)) return false;
+      if (!this.splitInvolves(e, "me")) return false;
+      if (friendId && !this.splitInvolves(e, friendId)) return false;
       if (from && e.date < from) return false;
       if (to && e.date > to) return false;
       return true;
@@ -598,7 +602,7 @@ const Store = {
       const theirs = friendId ? e.shares.find(s => s.id === friendId) : null;
       const c = this.cat(e.categoryId || "c_other");
       if (!map[c.id]) map[c.id] = { cat: c, mine: 0, theirs: 0, total: 0, count: 0 };
-      map[c.id].mine += mine.amount;
+      map[c.id].mine += mine ? mine.amount : 0;
       if (theirs) map[c.id].theirs += theirs.amount;
       map[c.id].total += e.amount;
       map[c.id].count++;
@@ -619,21 +623,25 @@ const Store = {
       if (!inWindow(e.date)) continue;
       const mine = e.shares.find(s => s.id === "me");
       const theirs = e.shares.find(s => s.id === friendId);
-      if (!mine || !theirs) continue;              // not a two-of-us expense
-      if (e.paidBy === "me") {
-        expenseCharges += theirs.amount;
+      const myAmt = mine ? mine.amount : 0;
+      const theirAmt = theirs ? theirs.amount : 0;
+      // What matters is who PAID. If you footed the bill, they owe their share
+      // even when you took no share of your own (paying entirely for others),
+      // and likewise the other way round.
+      if (e.paidBy === "me" && theirs) {
+        expenseCharges += theirAmt;
         items.push({ kind: "expense", id: e.id, date: e.date, desc: e.desc,
           categoryId: e.categoryId, groupId: e.groupId, total: e.amount,
           ways: e.shares.length, shares: e.shares,
-          theirShare: theirs.amount, myShare: mine.amount,
-          paidBy: "me", delta: theirs.amount });
-      } else if (e.paidBy === friendId) {
-        expenseCredits += mine.amount;
+          theirShare: theirAmt, myShare: myAmt,
+          paidBy: "me", delta: theirAmt });
+      } else if (e.paidBy === friendId && mine) {
+        expenseCredits += myAmt;
         items.push({ kind: "expense", id: e.id, date: e.date, desc: e.desc,
           categoryId: e.categoryId, groupId: e.groupId, total: e.amount,
           ways: e.shares.length, shares: e.shares,
-          theirShare: theirs.amount, myShare: mine.amount,
-          paidBy: friendId, delta: -mine.amount });
+          theirShare: theirAmt, myShare: myAmt,
+          paidBy: friendId, delta: -myAmt });
       }
       // paid by a third party: nothing moves directly between the two of you
     }
