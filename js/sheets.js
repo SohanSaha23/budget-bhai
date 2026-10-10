@@ -1198,6 +1198,140 @@ function statementSheet() {
   };
 }
 
+/* =============== SPLIT STATEMENT =============== */
+const Stmt = {
+  friendId: null,
+  period: "since",            // since | daily | weekly | monthly | yearly | custom | all
+  anchor: D.todayISO(),
+  custom: { from: D.addDays(D.todayISO(), -29), to: D.todayISO() },
+
+  range() {
+    const p = this.period, a = this.anchor;
+    if (p === "all") return { from: "", to: "", label: "All time" };
+    if (p === "since") {
+      const last = Store.lastSettlementWith(this.friendId);
+      if (!last) return { from: "", to: "", label: "All time (no payments yet)" };
+      const from = D.addDays(last.date, 1);
+      return { from, to: "", label: "Since the payment on " + D.short(last.date) };
+    }
+    if (p === "custom") return { from: this.custom.from, to: this.custom.to,
+      label: D.short(this.custom.from) + " – " + D.short(this.custom.to) };
+    if (p === "daily") return { from: a, to: a, label: D.human(a) };
+    if (p === "weekly") {
+      const from = D.weekStart(a);
+      return { from, to: D.addDays(from, 6), label: D.short(from) + " – " + D.short(D.addDays(from, 6)) };
+    }
+    if (p === "yearly") {
+      const y = a.slice(0, 4);
+      return { from: y + "-01-01", to: y + "-12-31", label: y };
+    }
+    const [y, m] = a.split("-").map(Number);
+    return { from: a.slice(0, 7) + "-01",
+      to: a.slice(0, 7) + "-" + String(D.daysInMonth(y, m - 1)).padStart(2, "0"),
+      label: D.monthName(y, m - 1) };
+  },
+
+  move(dir) {
+    const p = this.period;
+    if (p === "daily") this.anchor = D.addDays(this.anchor, dir);
+    else if (p === "weekly") this.anchor = D.addDays(this.anchor, 7 * dir);
+    else if (p === "yearly") this.anchor = D.addMonths(this.anchor, 12 * dir);
+    else if (p === "monthly") this.anchor = D.addMonths(this.anchor, dir);
+    this.render();
+  },
+
+  open(friendId) {
+    this.friendId = friendId;
+    this.period = Store.lastSettlementWith(friendId) ? "since" : "all";
+    this.anchor = D.todayISO();
+    this.render();
+  },
+
+  render() {
+    const who = Store.friend(this.friendId)?.name || "Friend";
+    const r = this.range();
+    const st = Store.friendStatement(this.friendId, r.from, r.to);
+    const due = st.closing;
+    const nExp = st.items.filter(i => i.kind === "expense").length;
+    const nPay = st.items.filter(i => i.kind === "payment").length;
+    const stepper = ["daily", "weekly", "monthly", "yearly"].includes(this.period);
+
+    Sheet.open(`
+      <div class="sheet-title">📄 Statement for ${esc(who)}</div>
+      <div class="seg" style="margin-bottom:10px">
+        ${[["since", "Since payment"], ["all", "All"], ["custom", "Range"]].map(([k, lb]) =>
+          `<button class="${this.period === k ? "on" : ""}" data-sp="${k}" style="font-size:11.5px">${lb}</button>`).join("")}
+      </div>
+      <div class="seg" style="margin-bottom:10px">
+        ${[["daily", "Day"], ["weekly", "Week"], ["monthly", "Month"], ["yearly", "Year"]].map(([k, lb]) =>
+          `<button class="${this.period === k ? "on" : ""}" data-sp="${k}" style="font-size:11.5px">${lb}</button>`).join("")}
+      </div>
+      ${stepper ? `<div class="month-sel">
+        <button data-smove="-1">‹</button><div class="m">${esc(r.label)}</div><button data-smove="1">›</button>
+      </div>` : this.period === "custom" ? `
+      <div class="card flat" style="padding:12px 14px">
+        <div class="row2">
+          <div class="field" style="margin:0"><label>From</label>
+            <input class="input" type="date" id="sm-from" value="${this.custom.from}"></div>
+          <div class="field" style="margin:0"><label>To</label>
+            <input class="input" type="date" id="sm-to" value="${this.custom.to}"></div>
+        </div>
+      </div>` : `<div class="sub center" style="margin-bottom:10px">${esc(r.label)}</div>`}
+
+      <div class="card" style="margin-bottom:12px">
+        <div class="center">
+          <div class="sub">${Math.abs(due) < 0.01 ? "All settled up"
+            : due > 0 ? esc(who) + " owes you" : "You owe " + esc(who)}</div>
+          <div class="h1 money ${due > 0 ? "pos" : due < 0 ? "neg" : ""}" style="margin:4px 0 12px">${fmt(Math.abs(due))}</div>
+        </div>
+        <div class="menu" style="margin:0">
+          <div class="menu-item"><span class="grow">Brought forward</span><b class="money">${fmt(st.opening)}</b></div>
+          ${st.period.expenseCharges ? `<div class="menu-item"><span class="grow">New shared expenses</span><b class="money">+ ${fmt(st.period.expenseCharges)}</b></div>` : ""}
+          ${st.period.expenseCredits ? `<div class="menu-item"><span class="grow">${esc(who)} paid for shared costs</span><b class="money">− ${fmt(st.period.expenseCredits)}</b></div>` : ""}
+          ${st.period.paymentsIn ? `<div class="menu-item"><span class="grow">Paid by ${esc(who)}</span><b class="money pos">− ${fmt(st.period.paymentsIn)}</b></div>` : ""}
+          ${st.period.paymentsOut ? `<div class="menu-item"><span class="grow">You paid ${esc(who)}</span><b class="money">+ ${fmt(st.period.paymentsOut)}</b></div>` : ""}
+          <div class="menu-item"><span class="grow"><b>Amount due</b></span><b class="money ${due > 0 ? "pos" : due < 0 ? "neg" : ""}">${fmt(Math.abs(due))}</b></div>
+        </div>
+        <div class="sub center mt8">${nExp} expense${nExp === 1 ? "" : "s"} · ${nPay} payment${nPay === 1 ? "" : "s"} in this period</div>
+      </div>
+
+      ${st.opening && r.from ? `<p class="sub center" style="margin-bottom:12px">
+        Carried forward: ${fmt(st.prior.expenseCharges)} was charged earlier${st.prior.paymentsIn
+          ? ", of which " + fmt(st.prior.paymentsIn) + " was paid" : ""} — leaving ${fmt(st.opening)}.</p>` : ""}
+
+      <button class="btn primary" id="sm-pdf">📄 Create PDF to send</button>
+      <button class="btn ghost mt8" data-action="close-sheet">Close</button>`);
+
+    document.querySelectorAll("#sheet [data-sp]").forEach(b =>
+      b.onclick = () => { this.period = b.dataset.sp; this.anchor = D.todayISO(); this.render(); });
+    document.querySelectorAll("#sheet [data-smove]").forEach(b =>
+      b.onclick = () => this.move(Number(b.dataset.smove)));
+    const f = document.getElementById("sm-from"), t = document.getElementById("sm-to");
+    if (f && t) {
+      const apply = () => {
+        let a = f.value, b = t.value;
+        if (!a || !b) return;
+        if (a > b) [a, b] = [b, a];
+        this.custom = { from: a, to: b };
+        this.render();
+      };
+      f.onchange = apply; t.onchange = apply;
+    }
+    document.getElementById("sm-pdf").onclick = async () => {
+      const btn = document.getElementById("sm-pdf");
+      btn.textContent = "Building…"; btn.disabled = true;
+      try {
+        await Report.shareSplitStatement(this.friendId, this.range());
+        toast("Statement ready", "📄");
+        Sheet.close();
+      } catch (e) {
+        toast("Couldn't build the PDF", "⚠️");
+        btn.textContent = "📄 Create PDF to send"; btn.disabled = false;
+      }
+    };
+  },
+};
+
 function currencySheet() {
   Sheet.open(`
     <div class="sheet-title">Currency</div>

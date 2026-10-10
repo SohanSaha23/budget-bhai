@@ -569,6 +569,7 @@ const Actions = {
     App.render();
   },
   "splitcat-open": d => splitCategorySheet(d.cat, d.friend || null, splitCatRange()),
+  "friend-statement": d => Stmt.open(d.id),
   "settle-edit": d => settleSheet({ edit: d.id }),
   "tx-filter-type": d => { UI.transFilter.type = d.type; App.render(); },
   "tx-scope": d => {

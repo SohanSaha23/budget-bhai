@@ -225,6 +225,201 @@ const Report = {
     return doc;
   },
 
+  /* ---------- split statement for one friend ---------- */
+  splitStatement(friendId, range) {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: "pt", format: "a4" });
+    const W = doc.internal.pageSize.getWidth();
+    const H = doc.internal.pageSize.getHeight();
+    const M = 42;
+    let cursor = 0;
+
+    const INK = [16, 21, 48], MUTED = [93, 102, 132], VIOLET = [108, 92, 231];
+    const GREEN = [5, 150, 105], RED = [225, 29, 72], LINE = [227, 231, 242];
+
+    const who = Store.friend(friendId)?.name || "Friend";
+    const me = Store.state.settings.name || "Me";
+    const st = Store.friendStatement(friendId, range.from, range.to);
+
+    const header = (first) => {
+      doc.setFillColor(...VIOLET);
+      doc.rect(0, 0, W, first ? 5 : 3, "F");
+      cursor = first ? 64 : 48;
+    };
+    const footer = () => {
+      doc.setDrawColor(...LINE); doc.setLineWidth(0.6);
+      doc.line(M, H - 44, W - M, H - 44);
+      doc.setFont("helvetica", "normal").setFontSize(8).setTextColor(...MUTED);
+      doc.text("Split statement · " + who + " · " + range.label, M, H - 30);
+      doc.text("Page " + doc.internal.getNumberOfPages(), W - M, H - 30, { align: "right" });
+    };
+    const room = (need) => { if (cursor + need >= H - 60) { footer(); doc.addPage(); header(false); } };
+    const heading = (text) => {
+      room(44); cursor += 10;
+      doc.setFont("helvetica", "bold").setFontSize(12).setTextColor(...VIOLET);
+      doc.text(text, M, cursor);
+      cursor += 6;
+      doc.setDrawColor(...LINE); doc.setLineWidth(0.8);
+      doc.line(M, cursor, W - M, cursor);
+      cursor += 16;
+    };
+
+    /* ---- title ---- */
+    header(true);
+    doc.setFont("helvetica", "bold").setFontSize(22).setTextColor(...INK);
+    doc.text("Split Statement", M, cursor);
+    cursor += 22;
+    doc.setFont("helvetica", "normal").setFontSize(12).setTextColor(...MUTED);
+    doc.text("For " + who + "   ·   from " + me, M, cursor);
+    doc.setFontSize(8.5);
+    doc.text("Generated " + new Date().toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }),
+      W - M, cursor, { align: "right" });
+    cursor += 14;
+    doc.setFontSize(9.5).setTextColor(...INK);
+    doc.text("Period: " + range.label, M, cursor);
+    cursor += 20;
+
+    /* ---- amount due banner ---- */
+    const due = st.closing;
+    const owesMe = due > 0.01, owesThem = due < -0.01;
+    doc.setFillColor(246, 247, 252);
+    doc.roundedRect(M, cursor, W - 2 * M, 62, 6, 6, "F");
+    doc.setFont("helvetica", "normal").setFontSize(9).setTextColor(...MUTED);
+    doc.text(owesMe ? who + " owes " + me : owesThem ? me + " owes " + who : "All settled up",
+      W / 2, cursor + 22, { align: "center" });
+    doc.setFont("helvetica", "bold").setFontSize(24)
+      .setTextColor(...(owesMe ? GREEN : owesThem ? RED : MUTED));
+    doc.text(this.money(Math.abs(due)), W / 2, cursor + 48, { align: "center" });
+    cursor += 80;
+
+    /* ---- how we got here ---- */
+    heading("How this adds up");
+    const lineItem = (label, value, opts) => {
+      const o = opts || {};
+      room(18);
+      doc.setFont("helvetica", o.bold ? "bold" : "normal").setFontSize(o.bold ? 10.5 : 9.5);
+      doc.setTextColor(...(o.labelColor || (o.bold ? INK : MUTED)));
+      doc.text(label, M, cursor);
+      doc.setTextColor(...(o.color || INK));
+      doc.setFont("helvetica", "bold");
+      doc.text(value, W - M, cursor, { align: "right" });
+      cursor += o.gap || 16;
+      if (o.rule) {
+        doc.setDrawColor(...LINE); doc.setLineWidth(0.5);
+        doc.line(M, cursor - 11, W - M, cursor - 11);
+      }
+    };
+
+    const p = st.prior;
+    if (range.from && (p.expenseCharges || p.paymentsIn || p.paymentsOut || p.expenseCredits)) {
+      lineItem("Earlier charges (before " + D.short(range.from) + ")", this.money(p.expenseCharges), { rule: true });
+      if (p.expenseCredits) lineItem("Less: " + who + " paid for shared costs", "- " + this.money(p.expenseCredits), { rule: true });
+      if (p.paymentsIn) lineItem("Less: already paid by " + who, "- " + this.money(p.paymentsIn), { color: GREEN, rule: true });
+      if (p.paymentsOut) lineItem("Plus: paid to " + who, "+ " + this.money(p.paymentsOut), { rule: true });
+      lineItem("Brought forward", this.money(st.opening), { bold: true, rule: true });
+    } else {
+      lineItem("Brought forward", this.money(st.opening), { bold: true, rule: true });
+    }
+
+    const per = st.period;
+    if (per.expenseCharges) lineItem("New shared expenses this period", "+ " + this.money(per.expenseCharges), { rule: true });
+    if (per.expenseCredits) lineItem("Paid by " + who + " this period", "- " + this.money(per.expenseCredits), { rule: true });
+    if (per.paymentsIn) lineItem("Payments received from " + who, "- " + this.money(per.paymentsIn), { color: GREEN, rule: true });
+    if (per.paymentsOut) lineItem("Payments made to " + who, "+ " + this.money(per.paymentsOut), { rule: true });
+    cursor += 2;
+    lineItem(owesThem ? "Amount you owe " + who : "Amount due from " + who, this.money(Math.abs(due)),
+      { bold: true, color: owesMe ? GREEN : owesThem ? RED : INK });
+
+    /* ---- itemised expenses ---- */
+    const exps = st.items.filter(i => i.kind === "expense");
+    if (exps.length) {
+      heading("Shared expenses in this period (" + exps.length + ")");
+      doc.setFont("helvetica", "bold").setFontSize(8.5).setTextColor(...MUTED);
+      doc.text("Date", M, cursor);
+      doc.text("Details", M + 58, cursor);
+      doc.text("Total bill", W - M - 150, cursor, { align: "right" });
+      doc.text(who + "'s share", W - M, cursor, { align: "right" });
+      cursor += 14;
+
+      const detailX = M + 58, detailW = (W - M - 160) - detailX;
+      exps.forEach(it => {
+        const cat = Store.cat(it.categoryId || "c_other");
+        const grp = it.groupId ? Store.group(it.groupId) : null;
+        doc.setFont("helvetica", "normal").setFontSize(9);
+        const nameLine = doc.splitTextToSize(it.desc, detailW)[0] || "";
+        const sub = cat.name + (grp ? " · " + grp.name : "") +
+          (it.paidBy === "me" ? " · you paid" : " · " + who + " paid") + " · " + it.ways + " ways";
+        doc.setFontSize(7.5);
+        const subLine = doc.splitTextToSize(sub, detailW)[0] || "";
+        room(30);
+
+        doc.setFont("helvetica", "normal").setFontSize(9).setTextColor(...MUTED);
+        doc.text(D.parse(it.date).getDate() + " " + D.parse(it.date).toLocaleDateString("en-IN", { month: "short" }), M, cursor);
+        doc.setTextColor(...INK);
+        doc.text(nameLine, detailX, cursor);
+        doc.text(this.money(it.total), W - M - 150, cursor, { align: "right" });
+        doc.setFont("helvetica", "bold");
+        doc.setTextColor(...(it.delta >= 0 ? INK : RED));
+        doc.text((it.delta >= 0 ? "" : "- ") + this.money(Math.abs(it.delta)), W - M, cursor, { align: "right" });
+        cursor += 11;
+        doc.setFont("helvetica", "italic").setFontSize(7.5).setTextColor(...MUTED);
+        doc.text(subLine, detailX, cursor);
+        cursor += 9;
+        doc.setDrawColor(...LINE); doc.setLineWidth(0.5);
+        doc.line(M, cursor - 3, W - M, cursor - 3);
+        cursor += 7;
+      });
+    }
+
+    /* ---- payments ---- */
+    const pays = st.items.filter(i => i.kind === "payment");
+    if (pays.length) {
+      heading("Payments in this period (" + pays.length + ")");
+      pays.forEach(it => {
+        room(18);
+        doc.setFont("helvetica", "normal").setFontSize(9).setTextColor(...MUTED);
+        doc.text(D.parse(it.date).getDate() + " " + D.parse(it.date).toLocaleDateString("en-IN", { month: "short" }), M, cursor);
+        doc.setTextColor(...INK);
+        doc.text(it.direction === "in" ? who + " paid " + me : me + " paid " + who, M + 58, cursor);
+        doc.setFont("helvetica", "bold").setTextColor(...(it.direction === "in" ? GREEN : INK));
+        doc.text((it.direction === "in" ? "- " : "+ ") + this.money(it.amount), W - M, cursor, { align: "right" });
+        cursor += 13;
+        doc.setDrawColor(...LINE); doc.setLineWidth(0.5);
+        doc.line(M, cursor - 5, W - M, cursor - 5);
+        cursor += 4;
+      });
+    }
+
+    if (!exps.length && !pays.length) {
+      heading("Activity");
+      doc.setFont("helvetica", "italic").setFontSize(9.5).setTextColor(...MUTED);
+      doc.text("No shared expenses or payments in this period.", M, cursor);
+      cursor += 16;
+    }
+
+    /* ---- note when the app's simplified group maths differs ---- */
+    if ((!range.to || range.to >= D.todayISO()) && Math.abs(st.simplified - due) > 1) {
+      room(40);
+      cursor += 6;
+      doc.setFont("helvetica", "italic").setFontSize(7.5).setTextColor(...MUTED);
+      const note = "Note: this statement is the direct account between the two of you. Inside shared groups "
+        + "Budget Bhai can also simplify who pays whom across everyone, which nets your balance to "
+        + this.money(Math.abs(st.simplified)) + ".";
+      doc.splitTextToSize(note, W - 2 * M).forEach(l => { doc.text(l, M, cursor); cursor += 10; });
+    }
+
+    footer();
+    return doc;
+  },
+
+  async shareSplitStatement(friendId, range) {
+    if (!this.available()) { toast("PDF engine didn't load", "⚠️"); return; }
+    const doc = this.splitStatement(friendId, range);
+    const who = (Store.friend(friendId)?.name || "friend").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    await App.downloadBinary("statement-" + who + "-" + D.todayISO() + ".pdf",
+      doc.output("datauristring").split(",")[1], "application/pdf");
+  },
+
   async share(y, m) {
     if (!this.available()) { toast("PDF engine didn't load", "⚠️"); return; }
     const doc = this.build(y, m);

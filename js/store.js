@@ -606,6 +606,78 @@ const Store = {
     return Object.values(map).sort((a, b) => b.mine - a.mine);
   },
 
+  /* ---------- statement ledger between you and one friend ----------
+     A plain person-to-person account: their share of what you paid, your share
+     of what they paid, and cash settled either way. Every line adds up to `net`
+     (positive = they owe you), which is what a statement has to do. */
+  friendLedger(friendId, from, to) {
+    const inWindow = (d) => (!from || d >= from) && (!to || d <= to);
+    const items = [];
+    let expenseCharges = 0, expenseCredits = 0, paymentsIn = 0, paymentsOut = 0;
+
+    for (const e of this.state.splitExpenses) {
+      if (!inWindow(e.date)) continue;
+      const mine = e.shares.find(s => s.id === "me");
+      const theirs = e.shares.find(s => s.id === friendId);
+      if (!mine || !theirs) continue;              // not a two-of-us expense
+      if (e.paidBy === "me") {
+        expenseCharges += theirs.amount;
+        items.push({ kind: "expense", id: e.id, date: e.date, desc: e.desc,
+          categoryId: e.categoryId, groupId: e.groupId, total: e.amount,
+          ways: e.shares.length, shares: e.shares,
+          theirShare: theirs.amount, myShare: mine.amount,
+          paidBy: "me", delta: theirs.amount });
+      } else if (e.paidBy === friendId) {
+        expenseCredits += mine.amount;
+        items.push({ kind: "expense", id: e.id, date: e.date, desc: e.desc,
+          categoryId: e.categoryId, groupId: e.groupId, total: e.amount,
+          ways: e.shares.length, shares: e.shares,
+          theirShare: theirs.amount, myShare: mine.amount,
+          paidBy: friendId, delta: -mine.amount });
+      }
+      // paid by a third party: nothing moves directly between the two of you
+    }
+
+    for (const s of this.state.settlements) {
+      if (!inWindow(s.date)) continue;
+      if (s.from === friendId && s.to === "me") {
+        paymentsIn += s.amount;
+        items.push({ kind: "payment", id: s.id, date: s.date, amount: s.amount,
+          groupId: s.groupId, direction: "in", delta: -s.amount });
+      } else if (s.from === "me" && s.to === friendId) {
+        paymentsOut += s.amount;
+        items.push({ kind: "payment", id: s.id, date: s.date, amount: s.amount,
+          groupId: s.groupId, direction: "out", delta: s.amount });
+      }
+    }
+
+    items.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+    const net = Math.round((expenseCharges - expenseCredits - paymentsIn + paymentsOut) * 100) / 100;
+    return { items, expenseCharges, expenseCredits, paymentsIn, paymentsOut, net };
+  },
+
+  /* the most recent cash settlement either way, or null */
+  lastSettlementWith(friendId) {
+    const rows = this.state.settlements.filter(s =>
+      (s.from === friendId && s.to === "me") || (s.from === "me" && s.to === friendId));
+    if (!rows.length) return null;
+    return rows.reduce((a, b) => a.date > b.date ? a : b);
+  },
+
+  /* opening balance + this period's movement + what's due now */
+  friendStatement(friendId, from, to) {
+    const prior = from ? this.friendLedger(friendId, "", D.addDays(from, -1))
+                       : { expenseCharges: 0, expenseCredits: 0, paymentsIn: 0, paymentsOut: 0, net: 0, items: [] };
+    const period = this.friendLedger(friendId, from, to);
+    let running = prior.net;
+    const items = period.items.map(it => { running += it.delta; return { ...it, running }; });
+    return {
+      opening: prior.net, prior, period, items,
+      closing: Math.round((prior.net + period.net) * 100) / 100,
+      simplified: this.friendBalance(friendId),   // what the app shows, for cross-checking
+    };
+  },
+
   /* the individual shared expenses behind one category slice */
   splitExpensesInCategory(catId, friendId, from, to) {
     return this.splitExpensesWith(friendId, from, to)

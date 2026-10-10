@@ -1044,6 +1044,7 @@ const Views = {
         <button class="btn ghost" data-action="settle-up" data-friend="${f.id}">🤝 Settle up</button>
         <button class="btn primary" data-action="add-split" data-friend="${f.id}">＋ Split expense</button>
       </div>
+      <button class="btn ghost mt8" data-action="friend-statement" data-id="${f.id}">📄 Send statement</button>
     </div>
     ${shared.length ? `<div class="sec"><span class="h2">Shared groups</span></div>
     <div class="card flat" style="padding:8px 10px">
@@ -1453,6 +1454,6 @@ const Views = {
       ${item("🧪", "Reset demo data", "", "reset-demo")}
       ${item("🗑️", "Erase everything", "", "erase-all")}
     </div>
-    <p class="sub center" style="margin-top:18px">Budget Bhai · v2.2 · data stays on your device 🔒</p>`;
+    <p class="sub center" style="margin-top:18px">Budget Bhai · v2.3 · data stays on your device 🔒</p>`;
   },
 };
