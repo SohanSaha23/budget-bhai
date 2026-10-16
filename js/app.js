@@ -546,7 +546,6 @@ const Actions = {
   "month-next": () => { const d = new Date(UI.month.y, UI.month.m + 1, 1); UI.month = { y: d.getFullYear(), m: d.getMonth() }; App.render(); },
 
   "stats-type": d => { UI.statsType = d.type; App.render(); },
-  "stats-mine": d => { UI.statsMine = d.m === "1"; App.render(); },
   "stats-period": d => { UI.stats.period = d.p; UI.stats.anchor = D.todayISO(); App.render(); },
   "stats-preset": d => {
     const n = Number(d.n);

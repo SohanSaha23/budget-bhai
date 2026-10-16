@@ -9,7 +9,6 @@ const UI = {
   stats: { period: "monthly", anchor: D.todayISO(),
     custom: { from: D.addDays(D.todayISO(), -29), to: D.todayISO() } },
   statsType: "expense",
-  statsMine: false,
   splitsTab: "friends",
   splitPeriod: "monthly",
   loansTab: "lent",
@@ -42,11 +41,9 @@ function txRow(t, showRunning) {
     emoji = c.emoji; color = c.color;
     name = t.payee || c.name;
     meta = c.name + " · " + accName + (t.note ? " · " + t.note : "");
-    const sp = t.type === "expense" ? Store.splitForTx(t) : null;
     amtHtml = t.type === "income"
       ? `<div class="amt pos">+${fmt(t.amount)}</div>`
-      : `<div class="amt neg">−${fmt(t.amount)}
-          ${sp ? `<div class="sub share-tag">🙋 yours ${fmt(Store.myShareOf(t))}</div>` : ""}</div>`;
+      : `<div class="amt neg">−${fmt(t.amount)}</div>`;
   }
   return `<div class="tx" data-action="tx-detail" data-id="${t.id}">
     <div class="emo" style="background:${tint(color, .16)}">${emoji}</div>
@@ -131,53 +128,69 @@ function splitCatControls() {
       </div>`}`;
 }
 
-/* "where does my money with this person go" — donut + ranked, tappable categories.
-   Pass no friendId for every split you're part of. */
+/* Category breakdown for splits.
+   On a friend's page the headline is THEIR spending — that's what you'd tell
+   them. On the overall Splits tab it's YOUR own share, i.e. what you actually
+   spent on yourself out of all the bills you've shared. */
 function splitCategoryPanel(friendId, who) {
   const { from, to, label } = splitCatRange();
-  const rows = Store.splitCategoryBreakdown(friendId, from, to);
+  const raw = Store.splitCategoryBreakdown(friendId, from, to);
   const controls = splitCatControls();
-  if (!rows.length) {
+  if (!raw.length) {
     return controls + `<div class="empty"><div class="big">🍰</div>
       No shared expenses ${UI.splitCat.period === "all" ? "yet" : "in " + esc(label)}.</div>`;
   }
+
+  const forFriend = !!friendId;
+  const val = r => forFriend ? (r.theirs || 0) : r.mine;          // what this view is about
+  const rows = [...raw].sort((a, b) => val(b) - val(a));
+
+  const focusTotal = rows.reduce((s, r) => s + val(r), 0);
   const mineTotal = rows.reduce((s, r) => s + r.mine, 0);
-  const sharedTotal = rows.reduce((s, r) => s + r.total, 0);
   const theirTotal = rows.reduce((s, r) => s + (r.theirs || 0), 0);
+  const sharedTotal = rows.reduce((s, r) => s + r.total, 0);
   const count = rows.reduce((s, r) => s + r.count, 0);
-  const donut = rows.slice(0, 6).map(r => ({ label: r.cat.name, value: r.mine, color: r.cat.color }));
-  const rest = rows.slice(6).reduce((s, r) => s + r.mine, 0);
+
+  const donut = rows.slice(0, 6).map(r => ({ label: r.cat.name, value: val(r), color: r.cat.color }));
+  const rest = rows.slice(6).reduce((s, r) => s + val(r), 0);
   if (rest > 0) donut.push({ label: "Others", value: rest, color: "#64748b" });
   const top = rows[0];
+  const centre = forFriend ? esc(who) + "'s spend" : "Your share";
 
   return controls + `
     <div class="card">
       <div class="donut-wrap">
-        ${Charts.donut(donut, 150, "Your share", fmt(mineTotal))}
+        ${Charts.donut(donut, 150, centre, fmt(focusTotal))}
         <div class="legend">
           ${donut.map(d => `<div class="li"><span class="dot" style="background:${d.color}"></span>
-            <span class="nm">${esc(d.label)}</span><span class="pc">${mineTotal ? Math.round(d.value / mineTotal * 100) : 0}%</span></div>`).join("")}
+            <span class="nm">${esc(d.label)}</span><span class="pc">${focusTotal ? Math.round(d.value / focusTotal * 100) : 0}%</span></div>`).join("")}
         </div>
       </div>
       <div class="divider"></div>
       <div class="sum3">
-        <div class="cell"><div class="lab">Your share</div><div class="val money">${fmt(mineTotal)}</div></div>
-        ${friendId ? `<div class="cell"><div class="lab">${esc(who)}'s share</div><div class="val money">${fmt(theirTotal)}</div></div>` : ""}
+        ${forFriend
+          ? `<div class="cell"><div class="lab">${esc(who)} spent</div><div class="val money">${fmt(theirTotal)}</div></div>
+             <div class="cell"><div class="lab">You spent</div><div class="val money">${fmt(mineTotal)}</div></div>`
+          : `<div class="cell"><div class="lab">Your share</div><div class="val money">${fmt(mineTotal)}</div></div>`}
         <div class="cell"><div class="lab">Total billed</div><div class="val money">${fmt(sharedTotal)}</div></div>
       </div>
-      <div class="sub center">Biggest ${friendId ? "with " + esc(who) : ""}: <b>${top.cat.emoji} ${esc(top.cat.name)}</b>
-        — ${fmt(top.mine)} across ${count} shared expense${count === 1 ? "" : "s"} · ${esc(label)}</div>
+      <div class="sub center">${forFriend ? esc(who) + "'s biggest" : "Your biggest"}:
+        <b>${top.cat.emoji} ${esc(top.cat.name)}</b> — ${fmt(val(top))}
+        across ${count} shared expense${count === 1 ? "" : "s"} · ${esc(label)}</div>
     </div>
-    <div class="sec"><span class="h2">Tap a category for details</span></div>
+    <div class="sec"><span class="h2">${forFriend ? "Where " + esc(who) + "'s money went" : "Where your own money went"}</span>
+      <span class="sub">tap for details</span></div>
     <div class="card flat stagger" style="padding:10px 12px">
       ${rows.map(r => {
-        const pc = mineTotal ? Math.round(r.mine / mineTotal * 100) : 0;
+        const v = val(r);
+        const pc = focusTotal ? Math.round(v / focusTotal * 100) : 0;
         return `<div class="rank" data-action="splitcat-open" data-cat="${r.cat.id}" data-friend="${friendId || ""}">
           <div class="emo" style="background:${tint(r.cat.color, .16)}">${r.cat.emoji}</div>
           <div class="mid">
-            <div class="nm"><span>${esc(r.cat.name)} <span class="sub">${pc}%</span></span><b class="money">${fmt(r.mine)}</b></div>
+            <div class="nm"><span>${esc(r.cat.name)} <span class="sub">${pc}%</span></span><b class="money">${fmt(v)}</b></div>
             <div class="bar"><i style="width:${pc}%;background:${r.cat.color}"></i></div>
-            <div class="sub" style="margin-top:4px;font-size:11px">${r.count} expense${r.count === 1 ? "" : "s"} · ${fmt(r.total)} total bill${friendId && r.theirs ? " · " + esc(who) + " " + fmt(r.theirs) : ""}</div>
+            <div class="sub" style="margin-top:4px;font-size:11px">${r.count} expense${r.count === 1 ? "" : "s"} · ${fmt(r.total)} total bill${
+              forFriend ? " · yours " + fmt(r.mine) : ""}</div>
           </div>
           <span class="chev sub">›</span>
         </div>`;
@@ -281,8 +294,6 @@ const Views = {
     const totals = Store.splitTotals();
     const recent = [...s.transactions].sort((a, b) => a.date < b.date ? 1 : a.date > b.date ? -1 : -1).slice(0, 5);
     const spark = Store.dailySpend(14);
-    const monthFrom = y + "-" + String(m + 1).padStart(2, "0") + "-01";
-    const myShare = Store.shareSummary(monthFrom, y + "-" + String(m + 1).padStart(2, "0") + "-" + String(D.daysInMonth(y, m)).padStart(2, "0"));
 
     return `
     <div class="page-head">
@@ -309,7 +320,6 @@ const Views = {
         <div class="hero-pill">
           <div class="lab"><svg viewBox="0 0 24 24"><path d="M12 5v14m0 0 6-6m-6 6-6-6"/></svg> Expense · ${D.monthName(y, m, true).split(" ")[0]}</div>
           <div class="val money">${fmt(exp)}</div>
-          ${myShare.others > 0 ? `<div class="lab" style="margin-top:3px">🙋 ${fmt(myShare.mine)} was yours</div>` : ""}
         </div>
       </div>
     </div>
@@ -559,9 +569,8 @@ const Views = {
   /* trend bars matched to the period */
   statsTrend() {
     const p = UI.stats.period, a = UI.stats.anchor;
-    const mine = UI.statsMine && UI.statsType === "expense";
     const bars = [], cell = (from, to, label) => ({
-      label, inc: Store.rangeTotal(from, to, "income"), exp: Store.rangeTotal(from, to, "expense", mine),
+      label, inc: Store.rangeTotal(from, to, "income"), exp: Store.rangeTotal(from, to, "expense"),
     });
     if (p === "custom") {
       // bucket the chosen span into readable chunks: days, weeks, then months
@@ -630,18 +639,16 @@ const Views = {
 
   stats() {
     const type = UI.statsType;
-    const mine = UI.statsMine && type === "expense";   // "my share" only applies to spending
     const { from, to, label } = Views.statsRange();
     const prev = Views.prevStatsRange();
-    const inc = Store.rangeTotal(from, to, "income"), exp = Store.rangeTotal(from, to, "expense", mine);
-    const items = Store.categorySpendRange(from, to, type, mine);
-    const share = Store.shareSummary(from, to);
+    const inc = Store.rangeTotal(from, to, "income"), exp = Store.rangeTotal(from, to, "expense");
+    const items = Store.categorySpendRange(from, to, type);
     const total = items.reduce((s, i) => s + i.amt, 0);
     const trend = Views.statsTrend();
     const unit = { daily: "day", weekly: "week", monthly: "month", yearly: "year" }[UI.stats.period];
 
-    const deltas = Store.categoryDeltas(from, to, prev.from, prev.to, type, mine);
-    const merchants = type === "expense" ? Store.merchantStats(from, to, mine) : [];
+    const deltas = Store.categoryDeltas(from, to, prev.from, prev.to, type);
+    const merchants = type === "expense" ? Store.merchantStats(from, to) : [];
     const topMerchant = merchants.length ? merchants[0].total : 0;
 
     // heatmap shows the month the anchor sits in (the end month for a custom range)
@@ -650,15 +657,15 @@ const Views = {
     const hFrom = hAnchor.slice(0, 7) + "-01";
     const hTo = hAnchor.slice(0, 7) + "-" + String(D.daysInMonth(hy, hm)).padStart(2, "0");
 
-    const weekday = Store.weekdayStats(from, to, mine);
+    const weekday = Store.weekdayStats(from, to);
     const busiest = weekday.reduce((a, b) => b.total > a.total ? b : a, weekday[0]);
-    const tod = Store.timeOfDayStats(from, to, mine);
+    const tod = Store.timeOfDayStats(from, to);
     const todMax = Math.max(...tod.blocks.map(b => b.total), 1);
 
     const nw = Store.netWorthSeries(6);
     const nwChange = nw[nw.length - 1].value - nw[0].value;
     const anomalies = Store.anomalies(from, to);
-    const sr = Store.savingsRate(from, to, mine);
+    const sr = Store.savingsRate(from, to);
 
     const donutItems = items.slice(0, 6).map(i => ({ label: i.cat.name, value: i.amt, color: i.cat.color }));
     const rest = items.slice(6).reduce((s, i) => s + i.amt, 0);
@@ -694,23 +701,6 @@ const Views = {
       <button class="${type === "income" ? "on inc" : ""}" data-action="stats-type" data-type="income">Income</button>
     </div>
 
-    ${type === "expense" ? `
-    <div class="seg" style="margin-bottom:${mine ? "10px" : "16px"}">
-      <button class="${!UI.statsMine ? "on" : ""}" data-action="stats-mine" data-m="0" style="font-size:12.5px">💳 Total paid</button>
-      <button class="${UI.statsMine ? "on" : ""}" data-action="stats-mine" data-m="1" style="font-size:12.5px">🙋 My share</button>
-    </div>
-    ${mine ? `<div class="card mineset">
-      <div class="sum3" style="margin-bottom:10px">
-        <div class="cell"><div class="lab">You paid</div><div class="val money">${fmt(share.paid)}</div></div>
-        <div class="cell"><div class="lab">Others' part</div><div class="val money neg">−${fmt(share.others)}</div></div>
-        <div class="cell"><div class="lab">Actually yours</div><div class="val money pos">${fmt(share.mine)}</div></div>
-      </div>
-      <div class="bar big"><i style="width:${share.paid ? Math.round(share.mine / share.paid * 100) : 0}%;background:var(--primary)"></i></div>
-      <div class="sub center mt8">${share.paid ? Math.round(share.mine / share.paid * 100) : 0}% of what left your pocket was your own
-        · ${share.splitCount} of ${share.count} expenses were shared${share.unmatched
-          ? ` · <span class="warn">${share.unmatched} split${share.unmatched === 1 ? "" : "s"} not matched to a transaction</span>` : ""}</div>
-    </div>` : ""}` : ""}
-
     ${sr.inc > 0 || sr.exp > 0 ? `<div class="card kpi">
       <div class="card-row">
         <div>
@@ -738,7 +728,7 @@ const Views = {
     <div class="card">
       ${items.length ? `
       <div class="donut-wrap">
-        ${Charts.donut(donutItems, 150, mine ? "Your share" : type === "expense" ? "Spent" : "Earned", fmt(total))}
+        ${Charts.donut(donutItems, 150, type === "expense" ? "Spent" : "Earned", fmt(total))}
         <div class="legend">
           ${donutItems.map(i => `<div class="li"><span class="dot" style="background:${i.color}"></span>
             <span class="nm">${esc(i.label)}</span><span class="pc">${total ? Math.round(i.value / total * 100) : 0}%</span></div>`).join("")}
@@ -781,9 +771,9 @@ const Views = {
       }).join("")}
     </div>` : ""}
 
-    ${UI.stats.period !== "yearly" ? `<div class="sec"><span class="h2">Spending calendar</span><span class="sub">${D.monthName(hy, hm, true)}${mine ? " · your share" : ""}</span></div>
+    ${UI.stats.period !== "yearly" ? `<div class="sec"><span class="h2">Spending calendar</span><span class="sub">${D.monthName(hy, hm, true)}</span></div>
     <div class="card">
-      ${Charts.calendarHeat(hy, hm, Store.dailyMap(hFrom, hTo, mine))}
+      ${Charts.calendarHeat(hy, hm, Store.dailyMap(hFrom, hTo))}
     </div>` : ""}
 
     ${weekday.some(d => d.total > 0) ? `<div class="sec"><span class="h2">Day of week</span></div>
@@ -1480,6 +1470,6 @@ const Views = {
       ${item("🧪", "Reset demo data", "", "reset-demo")}
       ${item("🗑️", "Erase everything", "", "erase-all")}
     </div>
-    <p class="sub center" style="margin-top:18px">Budget Bhai · v2.5 · data stays on your device 🔒</p>`;
+    <p class="sub center" style="margin-top:18px">Budget Bhai · v2.6 · data stays on your device 🔒</p>`;
   },
 };

@@ -567,7 +567,9 @@ function splitCategorySheet(catId, friendId, range) {
         }).join("")}
       </div>
       <button class="btn ghost sm mt8" data-action="split-detail" data-id="${e.id}">Open this split</button>
-      <span class="sub" style="float:right;margin-top:14px">your share <b class="money">${fmt(mine ? mine.amount : 0)}</b></span>
+      <span class="sub" style="float:right;margin-top:14px">${friendId
+        ? esc(who) + " <b class='money'>" + fmt((e.shares.find(x => x.id === friendId) || { amount: 0 }).amount) + "</b>"
+        : "your share <b class='money'>" + fmt(mine ? mine.amount : 0) + "</b>"}</span>
     </div>`;
   };
 
@@ -576,8 +578,10 @@ function splitCategorySheet(catId, friendId, range) {
     <div class="sub center" style="margin-bottom:12px">
       ${friendId ? "with " + esc(who) : "across all splits"} · ${esc(range.label)}</div>
     <div class="sum3" style="margin-bottom:14px">
-      <div class="cell"><div class="lab">Your share</div><div class="val money">${fmt(mineTotal)}</div></div>
-      ${friendId ? `<div class="cell"><div class="lab">${esc(who)}</div><div class="val money">${fmt(theirTotal)}</div></div>` : ""}
+      ${friendId
+        ? `<div class="cell"><div class="lab">${esc(who)} spent</div><div class="val money">${fmt(theirTotal)}</div></div>
+           <div class="cell"><div class="lab">You spent</div><div class="val money">${fmt(mineTotal)}</div></div>`
+        : `<div class="cell"><div class="lab">Your share</div><div class="val money">${fmt(mineTotal)}</div></div>`}
       <div class="cell"><div class="lab">Total billed</div><div class="val money">${fmt(billTotal)}</div></div>
     </div>
     <div style="max-height:52vh;overflow-y:auto;margin:0 -2px;padding:0 2px">
