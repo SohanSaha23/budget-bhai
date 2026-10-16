@@ -237,8 +237,13 @@ const TxSheet = {
     else {
       // stamp the clock so the time-of-day breakdown has something to work with
       data.time = new Date().toTimeString().slice(0, 5);
+      if (splitData) data.splitId = splitData.id;          // so "my share" knows your portion
       Store.addTransaction(data);
-      if (splitData) { Store.state.splitExpenses.push(splitData); Store.save(); }
+      if (splitData) {
+        splitData.txId = Store.state.transactions[Store.state.transactions.length - 1].id;
+        Store.state.splitExpenses.push(splitData);
+        Store.save();
+      }
       toast(splitData ? "Expense added · split tracked 🧾" : st.type === "expense" ? "Expense added" : st.type === "income" ? "Income added" : "Transfer added", "✅");
     }
     Sheet.close(); App.render();

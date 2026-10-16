@@ -140,6 +140,7 @@ const Store = {
       this.state.categories.push(...extras.map(c => ({ ...c })));
       this.save();
     }
+    this.linkSplitsToTransactions();
   },
 
   /* ---------- app lock ---------- */
@@ -210,6 +211,85 @@ const Store = {
     return this.monthTx(y, m, type).reduce((s, t) => s + t.amount, 0);
   },
 
+  /* ---------- "what did I actually spend on myself" ----------
+     When you pay a bill for a group, the transaction holds the whole amount but
+     only your share is really yours. Each split is tied to the transaction that
+     recorded it, so every breakdown can be shown either way. */
+
+  splitForTx(t) {
+    if (!t || !t.splitId) return null;
+    return this.state.splitExpenses.find(e => e.id === t.splitId) || null;
+  },
+
+  /* your own portion of one transaction */
+  myShareOf(t) {
+    if (!t || t.type !== "expense") return t ? t.amount : 0;
+    const e = this.splitForTx(t);
+    if (!e) return t.amount;                       // not split -> all yours
+    const mine = e.shares.find(s => s.id === "me");
+    return mine ? mine.amount : 0;                 // paid for others only -> none of it
+  },
+
+  txAmount(t, mineOnly) { return mineOnly ? this.myShareOf(t) : t.amount; },
+
+  /* pairs split bills with the transaction that paid them. Additive and
+     idempotent — it only fills in links that are missing. */
+  linkSplitsToTransactions() {
+    const near = (a, b) => Math.abs(a - b) < 0.02;
+    const norm = x => String(x || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const txById = new Map(this.state.transactions.map(t => [t.id, t]));
+
+    // drop links whose other half no longer exists
+    for (const t of this.state.transactions) {
+      if (t.splitId && !this.state.splitExpenses.some(e => e.id === t.splitId)) delete t.splitId;
+    }
+    for (const e of this.state.splitExpenses) {
+      if (e.txId && !txById.has(e.txId)) delete e.txId;
+    }
+
+    const used = new Set(this.state.transactions.filter(t => t.splitId).map(t => t.id));
+    const byDate = {};
+    for (const t of this.state.transactions) {
+      if (t.type !== "expense") continue;
+      (byDate[t.date] = byDate[t.date] || []).push(t);
+    }
+    let linked = 0;
+    const take = (e, t) => { t.splitId = e.id; e.txId = t.id; used.add(t.id); linked++; };
+    const pending = () => this.state.splitExpenses.filter(e => e.paidBy === "me" && !e.txId);
+    const free = (list, amt) => (list || []).find(t => !used.has(t.id) && near(t.amount, amt));
+
+    // 1: same day, same amount, names look alike  2: same day + amount  3: a day either side
+    for (const e of pending()) {
+      const c = (byDate[e.date] || []).find(t => !used.has(t.id) && near(t.amount, e.amount) &&
+        (norm(t.payee) === norm(e.desc) || norm(t.payee).includes(norm(e.desc)) || norm(e.desc).includes(norm(t.payee))));
+      if (c) take(e, c);
+    }
+    for (const e of pending()) { const c = free(byDate[e.date], e.amount); if (c) take(e, c); }
+    for (const e of pending()) {
+      for (const d of [-1, 1]) {
+        const c = free(byDate[D.addDays(e.date, d)], e.amount);
+        if (c) { take(e, c); break; }
+      }
+    }
+    if (linked) this.save();
+    return linked;
+  },
+
+  /* headline numbers for the "my share" view */
+  shareSummary(from, to) {
+    const list = this.rangeTx(from, to, "expense");
+    let paid = 0, mine = 0, splitCount = 0;
+    for (const t of list) {
+      paid += t.amount;
+      const my = this.myShareOf(t);
+      mine += my;
+      if (this.splitForTx(t)) splitCount++;
+    }
+    const unmatched = this.state.splitExpenses.filter(e =>
+      e.paidBy === "me" && !e.txId && (!from || e.date >= from) && (!to || e.date <= to)).length;
+    return { paid, mine, others: Math.round((paid - mine) * 100) / 100, splitCount, unmatched, count: list.length };
+  },
+
   /* ---------- analytics ---------- */
 
   /* net worth at the end of a given day (respects excluded accounts) */
@@ -241,37 +321,37 @@ const Store = {
   },
 
   /* income vs expense as a savings-rate KPI */
-  savingsRate(from, to) {
+  savingsRate(from, to, mine) {
     const inc = this.rangeTotal(from, to, "income");
-    const exp = this.rangeTotal(from, to, "expense");
+    const exp = this.rangeTotal(from, to, "expense", mine);
     return { inc, exp, saved: inc - exp, rate: inc > 0 ? Math.round((inc - exp) / inc * 100) : null };
   },
 
   /* who you actually pay, ranked */
-  merchantStats(from, to) {
+  merchantStats(from, to, mine) {
     const map = {};
     for (const t of this.rangeTx(from, to, "expense")) {
       const key = (t.payee || "").trim() || this.cat(t.categoryId).name;
       if (!map[key]) map[key] = { name: key, total: 0, count: 0, catId: t.categoryId };
-      map[key].total += t.amount;
+      map[key].total += this.txAmount(t, mine);
       map[key].count++;
     }
     return Object.values(map).sort((a, b) => b.total - a.total);
   },
 
   /* spend by day of week (Mon first) */
-  weekdayStats(from, to) {
+  weekdayStats(from, to, mine) {
     const tot = [0, 0, 0, 0, 0, 0, 0], cnt = [0, 0, 0, 0, 0, 0, 0];
     for (const t of this.rangeTx(from, to, "expense")) {
       const i = (D.parse(t.date).getDay() + 6) % 7;
-      tot[i] += t.amount; cnt[i]++;
+      tot[i] += this.txAmount(t, mine); cnt[i]++;
     }
     return ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
       .map((label, i) => ({ label, total: tot[i], count: cnt[i] }));
   },
 
   /* spend by part of day — only counts transactions that carry a time */
-  timeOfDayStats(from, to) {
+  timeOfDayStats(from, to, mine) {
     const blocks = [
       { label: "Morning", hint: "5am–11am", lo: 5, hi: 11, emoji: "🌅", total: 0, count: 0 },
       { label: "Afternoon", hint: "12pm–4pm", lo: 12, hi: 16, emoji: "☀️", total: 0, count: 0 },
@@ -285,7 +365,7 @@ const Store = {
       let h = parseInt(t.time.slice(0, 2), 10);
       if (h < 5) h += 24;                       // after-midnight counts as night
       const b = blocks.find(x => h >= x.lo && h <= x.hi) || blocks[3];
-      b.total += t.amount; b.count++;
+      b.total += this.txAmount(t, mine); b.count++;
     }
     return { blocks, timed };
   },
@@ -311,10 +391,10 @@ const Store = {
   },
 
   /* per-category change vs the previous equivalent period */
-  categoryDeltas(from, to, pFrom, pTo, type) {
+  categoryDeltas(from, to, pFrom, pTo, type, mine) {
     const now = {}, prev = {};
-    for (const t of this.rangeTx(from, to, type)) now[t.categoryId] = (now[t.categoryId] || 0) + t.amount;
-    for (const t of this.rangeTx(pFrom, pTo, type)) prev[t.categoryId] = (prev[t.categoryId] || 0) + t.amount;
+    for (const t of this.rangeTx(from, to, type)) now[t.categoryId] = (now[t.categoryId] || 0) + this.txAmount(t, mine);
+    for (const t of this.rangeTx(pFrom, pTo, type)) prev[t.categoryId] = (prev[t.categoryId] || 0) + this.txAmount(t, mine);
     return Object.keys(now).map(cid => {
       const cur = now[cid], was = prev[cid] || 0;
       return {
@@ -346,23 +426,24 @@ const Store = {
   },
 
   /* per-day spend totals across a range (calendar heatmap) */
-  dailyMap(from, to) {
+  dailyMap(from, to, mine) {
     const map = {};
-    for (const t of this.rangeTx(from, to, "expense")) map[t.date] = (map[t.date] || 0) + t.amount;
+    for (const t of this.rangeTx(from, to, "expense")) map[t.date] = (map[t.date] || 0) + this.txAmount(t, mine);
     return map;
   },
 
   /* inclusive date-range queries (stats periods) */
+  /* an empty bound means "open ended" rather than "match nothing" */
   rangeTx(from, to, type) {
     return this.state.transactions.filter(t =>
-      t.date >= from && t.date <= to && (!type || t.type === type));
+      (!from || t.date >= from) && (!to || t.date <= to) && (!type || t.type === type));
   },
-  rangeTotal(from, to, type) {
-    return this.rangeTx(from, to, type).reduce((s, t) => s + t.amount, 0);
+  rangeTotal(from, to, type, mine) {
+    return this.rangeTx(from, to, type).reduce((s, t) => s + this.txAmount(t, mine), 0);
   },
-  categorySpendRange(from, to, type) {
+  categorySpendRange(from, to, type, mine) {
     const map = {};
-    for (const t of this.rangeTx(from, to, type)) map[t.categoryId] = (map[t.categoryId] || 0) + t.amount;
+    for (const t of this.rangeTx(from, to, type)) map[t.categoryId] = (map[t.categoryId] || 0) + this.txAmount(t, mine);
     return Object.entries(map)
       .map(([cid, amt]) => ({ cat: this.cat(cid), amt }))
       .sort((a, b) => b.amt - a.amt);
@@ -1007,6 +1088,16 @@ const Store = {
       { id: uid(), groupId: "g_goa", desc: "Scooty rental", categoryId: "c_trans", amount: 1600, paidBy: "f_priya", shares: eq(1600, all4), date: iso(18) },
       { id: uid(), groupId: null, desc: "Movie tickets", categoryId: "c_ent", amount: 600, paidBy: "me", shares: eq(600, ["me", "f_aakash"]), date: iso(5) },
     ];
+    // bills you paid also land in your own ledger, linked so "my share" works
+    for (const e of s.splitExpenses) {
+      if (e.paidBy !== "me") continue;
+      const t = { id: uid(), type: "expense", amount: e.amount, categoryId: e.categoryId,
+        accountId: "a_card", date: e.date, time: "19:" + String(between(10, 59)),
+        payee: e.desc, note: "Paid the full bill", splitId: e.id };
+      s.transactions.push(t);
+      e.txId = t.id;
+    }
+
     s.settlements = [
       { id: uid(), groupId: "g_goa", from: "f_aakash", to: "me", amount: 3000, date: iso(10) },
     ];

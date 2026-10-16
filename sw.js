@@ -1,6 +1,6 @@
 /* Budget Bhai — offline service worker.
    Bump CACHE on every deploy so phones pick up the new files. */
-const CACHE = "budget-bhai-v2.4.0";
+const CACHE = "budget-bhai-v2.5.0";
 
 const SHELL = [
   "./", "./index.html",
